@@ -110,17 +110,31 @@ The installer sets up a self-hosted Ruchoir instance à la carte. Propolis, the 
 proxy are always installed, plus the products chosen (choosing the chat also installs the drive). It
 keeps the manifest of installed products, published at a `.well-known` address.
 
-**Status:** empty. During the restructuring this repository only gets its ground: rules,
-configuration and CI. No feature is written or moved here until this tool is taken up, one
-project at a time.
+**Status:** v0. `ruchoir-install` writes an instance's directory and runs it with Docker Compose:
+Propolis, the hub and the proxy, in production (`init`, `up`, `down`) or on `*.localhost` (`dev`).
+The products are added with their phases (`init --products`).
 
-### What will live here
+### How it is built
 
-- The installer itself, and the manifest.
-- A development mode that runs the suite locally with demo data.
-- The end-to-end tests of a complete instance, run in CI.
-- Today's single-instance deployment (`docker-compose.yml` and `infra/deploy` in `Ruchoir/ruchoir`)
-  is where it starts from.
+- `src/lib.rs`: the instance (domain, mode) and `init`, which writes the directory.
+- `src/secrets.rs`: what is generated once and kept (`.env`, each client service's Ed25519 keys).
+  Running `init` again never replaces a secret or a key: the services and their data depend on them.
+- `src/render.rs`: every other file, written anew each time from the instance and its secrets:
+  `manifest.json`, `compose.yaml`, `traefik/`, `propolis/clients.toml`, `hub/subscriptions.toml`,
+  `postgres/init.sh`.
+- `src/dev_ca.rs`: in development, a local certificate authority the proxy and the services trust.
+- `src/main.rs`: the command line.
+
+### Gotchas
+
+- The services run as the owner of the instance's directory (`RUCHOIR_USER` in `.env`, set on
+  Linux): its private files are `0600`, and the images' own user could not read them.
+- The containers reach each other at their public names (`id.<domain>`) through aliases of the proxy
+  on the instance's network, so issuer URLs match inside and out. In development they trust the
+  local authority through `SSL_CERT_FILE`.
+- The registry written for Propolis must pass Propolis's own check (`deny_unknown_fields`,
+  `https` addresses, a `client_auth` key for `private_key_jwt`): change both together.
+- Operators put their own changes in `compose.override.yaml`, which `init` never touches.
 
 ### Boundaries
 
@@ -140,7 +154,7 @@ This repository's own decisions go in `docs/adr/`.
 
 - The conventions check, with a clone of `Ruchoir/.github` at `$RULES`:
   `bash "$RULES/scripts/check-conventions.sh" "$RULES/common-rules.md"`, from the root.
-- The build, lint and test commands arrive with the first code, with the shared `rust` and `node`
-  workflows of `Ruchoir/.github`.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
+  `cargo deny --config "$RULES/deny.toml" check`, as the shared `rust` workflow runs them.
 
 Licence: `AGPL-3.0-only` (`LICENSE`).
