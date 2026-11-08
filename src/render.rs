@@ -9,6 +9,8 @@
 //!   file (no Docker socket in the proxy), certificates by ACME from Actalis, or the development
 //!   certificate; access logs without query strings, where codes travel.
 //! - `garage/garage.toml`, with the drive: its object store (see [`crate::garage`]).
+//! - `office/`, with the drive: the files Euro-Office mounts (see [`crate::office`]), written as
+//!   copied from the monolith, since none names anything of the instance.
 //! - `compose.yaml`: everything above, run together.
 
 use std::path::Path;
@@ -28,11 +30,15 @@ pub const SUBNET: &str = "10.89.0.0/24";
 pub const ACTALIS_ACME: &str = "https://acme-api.actalis.com/acme/directory";
 
 fn write(dir: &Path, path: &str, text: &str) -> Result<(), String> {
+    write_bytes(dir, path, text.as_bytes())
+}
+
+fn write_bytes(dir: &Path, path: &str, bytes: &[u8]) -> Result<(), String> {
     let full = dir.join(path);
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    std::fs::write(&full, text).map_err(|e| format!("{}: {e}", full.display()))
+    std::fs::write(&full, bytes).map_err(|e| format!("{}: {e}", full.display()))
 }
 
 /// The manifest.
@@ -268,6 +274,16 @@ pub fn traefik_dynamic(instance: &Instance) -> String {
             "    {service}:\n      loadBalancer:\n        servers:\n          - url: http://{service}:8080\n"
         ));
     }
+    if instance.has("drive") {
+        // The office editor's own hostname goes to the drive, which relays it to the engine, its
+        // co-editing WebSocket included (Traefik carries upgrades as they come). The `Host` header
+        // is passed on unchanged: it is how the drive tells the editor's requests from its own.
+        let host = host_of(&crate::office::public_url(&instance.domain)).to_owned();
+        let office = crate::office::SERVICE;
+        routers.push_str(&format!(
+            "    {office}:\n      rule: Host(`{host}`)\n      entryPoints: [websecure]\n      service: drive\n{tls}"
+        ));
+    }
     // Browsers would remember HSTS for localhost long after the development instance is gone.
     let hsts = if instance.dev {
         ""
@@ -317,6 +333,11 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
     } else {
         ("", "", String::new())
     };
+    let office_network = if instance.has("drive") {
+        "  # The office engine's network: the engine and the drive, no route out.\n  office:\n    internal: true\n"
+    } else {
+        ""
+    };
     let (propolis_image, hub_image) = if instance.dev {
         // Built from the repositories (`ruchoir-install dev` says how).
         ("ruchoir/propolis:dev", "ruchoir/hub:dev")
@@ -361,7 +382,7 @@ networks:
     ipam:
       config:
         - subnet: {SUBNET}
-
+{office_network}
 volumes:
   postgres-data:
   valkey-data:
@@ -479,8 +500,9 @@ fn ca_volume_of(instance: &Instance) -> &'static str {
     }
 }
 
-/// The drive and its object store, Garage, neither published: the drive is reached through the
-/// proxy, Garage by the drive alone. The S3 key and Garage's secrets come from `.env`.
+/// The drive, its object store Garage and its office engine Euro-Office, none published: the drive
+/// is reached through the proxy, Garage and the engine by the drive alone. The S3 key and Garage's
+/// secrets come from `.env`.
 fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
     let drive = instance.url("drive");
     let propolis = instance.url("propolis");
@@ -495,6 +517,8 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
     };
     let garage = crate::garage::IMAGE;
     let bucket = crate::garage::BUCKET;
+    let office_env = crate::office::drive_env(&instance.domain);
+    let office = crate::office::service();
     format!(
         r#"
   drive:
@@ -517,10 +541,11 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
       DRIVE_HUB_URL: {hub}
       DRIVE_EVENTS_KEY: /keys/drive-events.pem
       DRIVE_EVENTS_KEY_ID: {events_kid}
-{trust}    volumes:
+{office_env}{trust}    volumes:
       - ./keys/drive-auth.pem:/keys/drive-auth.pem:ro
       - ./keys/drive-events.pem:/keys/drive-events.pem:ro
-{ca_volume}    networks: [ruchoir]
+{ca_volume}    # The instance's network, and the office engine's, which only the drive shares with it.
+    networks: [ruchoir, office]
     depends_on:
       postgres: {{ condition: service_healthy }}
       valkey: {{ condition: service_healthy }}
@@ -545,7 +570,7 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
     cap_drop: [ALL]
     read_only: true
     restart: unless-stopped
-"#
+{office}"#
     )
 }
 
@@ -557,6 +582,9 @@ pub fn write_all(dir: &Path, instance: &Instance, secrets: &Secrets) -> Result<(
     write(dir, "postgres/init.sh", &postgres_init(instance))?;
     if instance.has("drive") {
         write(dir, "garage/garage.toml", &crate::garage::config())?;
+        for file in crate::office::FILES {
+            write_bytes(dir, file.path, file.bytes)?;
+        }
     }
     write(dir, "traefik/traefik.yml", &traefik_static(instance))?;
     write(dir, "traefik/dynamic.yml", &traefik_dynamic(instance))?;

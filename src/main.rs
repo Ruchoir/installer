@@ -85,8 +85,9 @@ fn run(command: Commands) -> Result<(), String> {
             let instance = Instance::production(&domain, acme_email)?
                 .with_products(&products_kept(&dir, &products)?)?;
             init(&dir, &instance)?;
+            // With the drive, the office editor's own host too.
             let hosts: Vec<String> = instance
-                .services()
+                .hosted()
                 .into_iter()
                 .map(|s| instance.url(s))
                 .collect();
