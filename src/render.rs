@@ -2,12 +2,13 @@
 //!
 //! - `manifest.json`: the services installed and their addresses (ADR 0004), versioned.
 //! - `propolis/clients.toml`: the clients of the instance, with their public keys (Propolis's design,
-//!   section 9.2). In phase 2, the hub.
+//!   section 9.2): the hub, and the drive when it is installed.
 //! - `hub/subscriptions.toml`: which service receives which events. Empty until the products come.
 //! - `postgres/init.sh`: one database and one role per service.
 //! - `traefik/traefik.yml` and `traefik/dynamic.yml`: the proxy, routing each host to its service by
 //!   file (no Docker socket in the proxy), certificates by ACME from Actalis, or the development
 //!   certificate; access logs without query strings, where codes travel.
+//! - `garage/garage.toml`, with the drive: its object store (see [`crate::garage`]).
 //! - `compose.yaml`: everything above, run together.
 
 use std::path::Path;
@@ -36,9 +37,10 @@ fn write(dir: &Path, path: &str, text: &str) -> Result<(), String> {
 
 /// The manifest.
 pub fn manifest(instance: &Instance) -> String {
-    let services: serde_json::Map<String, serde_json::Value> = crate::ALWAYS
-        .iter()
-        .map(|s| ((*s).to_owned(), json!({ "url": instance.url(s) })))
+    let services: serde_json::Map<String, serde_json::Value> = instance
+        .services()
+        .into_iter()
+        .map(|s| (s.to_owned(), json!({ "url": instance.url(s) })))
         .collect();
     let manifest = json!({
         "version": MANIFEST_VERSION,
@@ -59,6 +61,10 @@ struct RegistryClient {
     name: String,
     first_party: bool,
     resource: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    redirect_uris: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    post_logout_redirect_uris: Vec<String>,
     grant_types: Vec<String>,
     scopes: Vec<String>,
     resource_scopes: Vec<String>,
@@ -75,38 +81,70 @@ struct RegistryKey {
     x: String,
 }
 
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|v| (*v).to_owned()).collect()
+}
+
 /// Propolis's client registry.
 pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
-    let key = |purpose: &str, registered: &str| {
-        let k = secrets.key("hub", purpose);
-        RegistryKey {
-            kid: k.kid.clone(),
-            purpose: registered.to_owned(),
-            kty: "OKP".to_owned(),
-            crv: "Ed25519".to_owned(),
-            x: k.x.clone(),
-        }
+    let jwks = |service: &str| {
+        [("auth", "client_auth"), ("events", "events")]
+            .into_iter()
+            .map(|(purpose, registered)| {
+                let k = secrets.key(service, purpose);
+                RegistryKey {
+                    kid: k.kid.clone(),
+                    purpose: registered.to_owned(),
+                    kty: "OKP".to_owned(),
+                    crv: "Ed25519".to_owned(),
+                    x: k.x.clone(),
+                }
+            })
+            .collect()
     };
     let hub = instance.url("hub");
-    let registry = Registry {
-        client: vec![RegistryClient {
-            client_id: "hub".to_owned(),
-            name: "Hub".to_owned(),
+    let mut client = vec![RegistryClient {
+        client_id: "hub".to_owned(),
+        name: "Hub".to_owned(),
+        first_party: true,
+        resource: hub.clone(),
+        redirect_uris: Vec::new(),
+        post_logout_redirect_uris: Vec::new(),
+        // The hub reads Propolis's change feed in its own name.
+        grant_types: strings(&["client_credentials"]),
+        // Propolis's change feed for the members' replica, and its mail for the unread digest.
+        scopes: strings(&["propolis:organizations.read", "propolis:mail.digest"]),
+        // What the products are given to reach the hub.
+        resource_scopes: strings(&["hub:publish"]),
+        backchannel_logout_uri: format!("{hub}/api/v1/backchannel-logout"),
+        jwks: jwks("hub"),
+    }];
+    if instance.has("drive") {
+        let drive = instance.url("drive");
+        client.push(RegistryClient {
+            client_id: "drive".to_owned(),
+            name: "Drive".to_owned(),
             first_party: true,
-            resource: hub.clone(),
-            // The hub reads Propolis's change feed in its own name.
-            grant_types: vec!["client_credentials".to_owned()],
-            // Propolis's change feed for the members' replica, and its mail for the unread digest.
-            scopes: vec![
-                "propolis:organizations.read".to_owned(),
-                "propolis:mail.digest".to_owned(),
-            ],
-            // What the products are given to reach the hub.
-            resource_scopes: vec!["hub:publish".to_owned()],
-            backchannel_logout_uri: format!("{hub}/api/v1/backchannel-logout"),
-            jwks: vec![key("auth", "client_auth"), key("events", "events")],
-        }],
-    };
+            resource: drive.clone(),
+            // People sign in to the drive (its own session, `/auth/*`).
+            redirect_uris: vec![format!("{drive}/auth/callback")],
+            post_logout_redirect_uris: vec![format!("{drive}/")],
+            // Its session, kept by refreshing, and its members' replica read in its own name.
+            grant_types: strings(&["authorization_code", "refresh_token", "client_credentials"]),
+            scopes: strings(&[
+                "openid",
+                "profile",
+                "email",
+                "organizations",
+                "propolis:organizations.read",
+            ]),
+            // What another product is given to manage the files it holds in the drive.
+            resource_scopes: strings(&["drive:held.manage"]),
+            backchannel_logout_uri: format!("{drive}/auth/backchannel-logout"),
+            jwks: jwks("drive"),
+        });
+    }
+    let registry = Registry { client };
     let header =
         "# The clients of this instance, written by ruchoir-install: never edit by hand, run\n\
                   # `ruchoir-install init` again. Public keys only.\n\n";
@@ -121,11 +159,11 @@ pub fn subscriptions() -> String {
 }
 
 /// One database and one role per service, made the first time PostgreSQL starts.
-pub fn postgres_init() -> String {
+pub fn postgres_init(instance: &Instance) -> String {
     let mut script = String::from(
         "#!/bin/sh\n# One database and one role per service (ruchoir-install). Runs once, on an empty data directory.\nset -eu\n",
     );
-    for service in crate::ALWAYS {
+    for service in instance.services() {
         let variable = format!("{}_DB_PASSWORD", service.to_ascii_uppercase());
         script.push_str(&format!(
             "psql -v ON_ERROR_STOP=1 --username \"$POSTGRES_USER\" <<SQL\n\
@@ -200,7 +238,7 @@ pub fn traefik_dynamic(instance: &Instance) -> String {
     };
     let mut routers = String::new();
     let mut services = String::new();
-    for service in crate::ALWAYS {
+    for service in instance.services() {
         let host = host_of(&instance.url(service)).to_owned();
         routers.push_str(&format!(
             "    {service}:\n      rule: Host(`{host}`)\n      entryPoints: [websecure]\n      service: {service}\n{tls}"
@@ -243,10 +281,20 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
     let hub_kid = &secrets.key("hub", "auth").kid;
     let propolis = instance.url("propolis");
     let hub = instance.url("hub");
-    let aliases: String = crate::ALWAYS
-        .iter()
+    let aliases: String = instance
+        .services()
+        .into_iter()
         .map(|s| format!("          - {}\n", host_of(&instance.url(s))))
         .collect();
+    let (drive_volumes, drive_db, drive) = if instance.has("drive") {
+        (
+            "  garage-meta:\n  garage-data:\n",
+            "      DRIVE_DB_PASSWORD: ${DRIVE_DB_PASSWORD}\n",
+            drive_services(instance, secrets),
+        )
+    } else {
+        ("", "", String::new())
+    };
     let (propolis_image, hub_image) = if instance.dev {
         // Built from the repositories (`ruchoir-install dev` says how).
         ("ruchoir/propolis:dev", "ruchoir/hub:dev")
@@ -258,10 +306,9 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
     };
     // In development the services reach each other's public names through the proxy and trust the
     // development authority; mails go to the catcher.
-    let (trust, ca_volume, mail, catcher) = if instance.dev {
+    let (trust, ca_volume) = (trust_of(instance), ca_volume_of(instance));
+    let (mail, catcher) = if instance.dev {
         (
-            "      SSL_CERT_FILE: /dev-ca/ca.pem\n",
-            "      - ./dev-ca:/dev-ca:ro\n",
             r#"      PROPOLIS_SMTP_HOST: mailpit
       PROPOLIS_SMTP_PORT: "1025"
       PROPOLIS_SMTP_TLS: none
@@ -278,7 +325,7 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
 "#,
         )
     } else {
-        ("", "", "", "")
+        ("", "")
     };
 
     format!(
@@ -297,7 +344,7 @@ volumes:
   postgres-data:
   valkey-data:
   acme:
-
+{drive_volumes}
 services:
   postgres:
     image: postgres:18-alpine
@@ -306,7 +353,7 @@ services:
       POSTGRES_PASSWORD: ${{POSTGRES_PASSWORD}}
       PROPOLIS_DB_PASSWORD: ${{PROPOLIS_DB_PASSWORD}}
       HUB_DB_PASSWORD: ${{HUB_DB_PASSWORD}}
-    volumes:
+{drive_db}    volumes:
       - postgres-data:/var/lib/postgresql
       - ./postgres/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
     networks: [ruchoir]
@@ -387,6 +434,88 @@ services:
       valkey: {{ condition: service_healthy }}
       propolis: {{ condition: service_started }}
     restart: unless-stopped
+{drive}"#
+    )
+}
+
+/// In development, the services trust the development authority.
+fn trust_of(instance: &Instance) -> &'static str {
+    if instance.dev {
+        "      SSL_CERT_FILE: /dev-ca/ca.pem\n"
+    } else {
+        ""
+    }
+}
+
+/// In development, the development authority, mounted.
+fn ca_volume_of(instance: &Instance) -> &'static str {
+    if instance.dev {
+        "      - ./dev-ca:/dev-ca:ro\n"
+    } else {
+        ""
+    }
+}
+
+/// The drive and its object store, Garage, neither published: the drive is reached through the
+/// proxy, Garage by the drive alone. The S3 key and Garage's secrets come from `.env`.
+fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
+    let drive = instance.url("drive");
+    let propolis = instance.url("propolis");
+    let kid = &secrets.key("drive", "auth").kid;
+    let (trust, ca_volume) = (trust_of(instance), ca_volume_of(instance));
+    let image = if instance.dev {
+        "ruchoir/drive:dev"
+    } else {
+        "registry.ruchoir.com/drive:latest"
+    };
+    let garage = crate::garage::IMAGE;
+    let bucket = crate::garage::BUCKET;
+    format!(
+        r#"
+  drive:
+    image: ${{DRIVE_IMAGE:-{image}}}
+    user: ${{RUCHOIR_USER:-10001:10001}}
+    environment:
+      DRIVE_PUBLIC_URL: {drive}
+      DRIVE_DATABASE_URL: postgres://drive:${{DRIVE_DB_PASSWORD}}@postgres:5432/drive
+      DRIVE_VALKEY_URL: redis://valkey:6379/2
+      DRIVE_TRUSTED_PROXIES: {SUBNET}
+      DRIVE_ISSUER: {propolis}
+      DRIVE_CLIENT_ID: drive
+      DRIVE_CLIENT_KEY: /keys/drive-auth.pem
+      DRIVE_CLIENT_KEY_ID: {kid}
+      DRIVE_S3_ENDPOINT: http://garage:3900
+      DRIVE_S3_REGION: garage
+      DRIVE_S3_BUCKET: {bucket}
+      DRIVE_S3_ACCESS_KEY_ID: ${{DRIVE_S3_ACCESS_KEY_ID}}
+      DRIVE_S3_SECRET_ACCESS_KEY: ${{DRIVE_S3_SECRET_ACCESS_KEY}}
+{trust}    volumes:
+      - ./keys/drive-auth.pem:/keys/drive-auth.pem:ro
+{ca_volume}    networks: [ruchoir]
+    depends_on:
+      postgres: {{ condition: service_healthy }}
+      valkey: {{ condition: service_healthy }}
+      propolis: {{ condition: service_started }}
+      garage: {{ condition: service_started }}
+    restart: unless-stopped
+
+  # The drive's object store (Garage, Deuxfleurs, France; AGPL-3.0), one node, reached at
+  # http://garage:3900 on this network alone. `ruchoir-install up` prepares it: layout, key, bucket.
+  garage:
+    image: {garage}
+    environment:
+      GARAGE_RPC_SECRET: ${{GARAGE_RPC_SECRET}}
+      GARAGE_ADMIN_TOKEN: ${{GARAGE_ADMIN_TOKEN}}
+    volumes:
+      - ./garage/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    networks: [ruchoir]
+    # Garage reads and writes its two volumes alone, and needs no capability.
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    restart: unless-stopped
 "#
     )
 }
@@ -396,7 +525,10 @@ pub fn write_all(dir: &Path, instance: &Instance, secrets: &Secrets) -> Result<(
     write(dir, "manifest.json", &manifest(instance))?;
     write(dir, "propolis/clients.toml", &registry(instance, secrets))?;
     write(dir, "hub/subscriptions.toml", &subscriptions())?;
-    write(dir, "postgres/init.sh", &postgres_init())?;
+    write(dir, "postgres/init.sh", &postgres_init(instance))?;
+    if instance.has("drive") {
+        write(dir, "garage/garage.toml", &crate::garage::config())?;
+    }
     write(dir, "traefik/traefik.yml", &traefik_static(instance))?;
     write(dir, "traefik/dynamic.yml", &traefik_dynamic(instance))?;
     write(dir, "compose.yaml", &compose(instance, secrets))?;
