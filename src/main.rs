@@ -230,7 +230,7 @@ fn build(source: &Path, service: &str) -> Result<(), String> {
         .arg("build")
         .arg("--tag")
         .arg(format!("ruchoir/{service}:dev"));
-    if matches!(service, "propolis" | "calendar") {
+    if matches!(service, "propolis" | "drive" | "calendar") {
         command
             .arg("--secret")
             .arg("id=npm_token,env=NODE_AUTH_TOKEN");
