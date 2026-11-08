@@ -1,0 +1,16 @@
+{
+  "name": "@ruchoir/installer-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The end-to-end test of a complete instance: sign-up, confirmation code, sign-in, in a browser.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "packageManager": "pnpm@11.24.0",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/node": "26.6.6"
+  }
+}

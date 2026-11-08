@@ -16,3 +16,68 @@ jobs:
     uses: Ruchoir/.github/.github/workflows/rust.yml@v1.9.0
     with:
       rules-ref: v1.9.0
+
+  # The exit test of the installer: a development instance built from the repositories of Propolis and
+  # the hub, then a person signing up, confirming their address and signing in, in a browser.
+  e2e:
+    name: End to end
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Propolis's pages are built from the organization's npm packages.
+      packages: read
+    steps:
+      - name: Check out the installer
+        uses: actions/checkout@v7.0.1
+
+      # A fine-grained token that reads the two repositories' contents, and nothing else.
+      - name: Check out Propolis
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: Ruchoir/propolis
+          token: ${{ secrets.RUCHOIR_E2E_TOKEN }}
+          path: source/propolis
+
+      - name: Check out the hub
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: Ruchoir/hub
+          token: ${{ secrets.RUCHOIR_E2E_TOKEN }}
+          path: source/hub
+
+      - name: Build the installer
+        run: cargo build --locked
+
+      - name: Start a development instance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./target/debug/ruchoir-install dev --dir ruchoir-dev --source source
+
+      - name: Set up Node
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: e2e/.nvmrc
+
+      - name: Install the browser
+        working-directory: e2e
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Sign up, confirm and sign in
+        working-directory: e2e
+        run: pnpm test
+
+      - name: Show the services' logs
+        if: failure()
+        working-directory: ruchoir-dev
+        run: docker compose logs --no-color
+
+      - name: Keep the browser's trace
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: playwright-report
+          path: e2e/playwright-report
+          retention-days: 7
