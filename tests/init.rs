@@ -403,10 +403,37 @@ fn without_the_drive_nothing_of_it_appears() {
     assert!(!read(dir.path(), "manifest.json").contains("drive"));
     assert!(!dir.path().join("garage").exists());
     assert!(!dir.path().join("keys/drive-auth.pem").exists());
+    assert!(!read(dir.path(), "hub/subscriptions.toml").contains("[[subscription]]"));
     assert_eq!(
         ruchoir_install::installed_products(dir.path()).unwrap(),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn the_drive_talks_to_the_hub_and_hears_propolis() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_drive(production())).unwrap();
+    let compose = read(dir.path(), "compose.yaml");
+    assert!(compose.contains("DRIVE_HUB_URL: https://hub.example.org"));
+    assert!(compose.contains("DRIVE_EVENTS_KEY: /keys/drive-events.pem"));
+    let events_kid = read(dir.path(), "keys/drive-events.kid");
+    assert!(compose.contains(&format!("DRIVE_EVENTS_KEY_ID: {}", events_kid.trim())));
+    assert!(compose.contains("./keys/drive-events.pem:/keys/drive-events.pem:ro"));
+    assert!(compose.contains("HUB_PAGE_ORIGINS: https://drive.example.org"));
+    // The hub delivers Propolis's events to the drive, on a host it knows as the drive's pages.
+    let subscriptions: toml::Table = read(dir.path(), "hub/subscriptions.toml").parse().unwrap();
+    let drive = &subscriptions["subscription"].as_array().unwrap()[0];
+    assert_eq!(drive["service"].as_str(), Some("drive"));
+    assert_eq!(
+        drive["endpoint"].as_str(),
+        Some("https://drive.example.org/api/v1/events")
+    );
+    assert_eq!(
+        drive["kinds"].as_array().unwrap()[0].as_str(),
+        Some("propolis.*")
+    );
+    assert!(read(dir.path(), "propolis/clients.toml").contains("\"hub:publish\""));
 }
 
 #[test]
@@ -499,6 +526,13 @@ fn check_registry(text: &str) -> Result<(), String> {
     let registry: CheckedRegistry = toml::from_str(text).map_err(|e| e.to_string())?;
     let mut ids = BTreeSet::new();
     let mut kids = BTreeSet::new();
+    // The scopes the instance's resources declare: a client may hold another resource's scope
+    // (the drive holds `hub:publish`) and ask for it there.
+    let declared: BTreeSet<&str> = registry
+        .clients
+        .iter()
+        .flat_map(|c| c.resource_scopes.iter().map(String::as_str))
+        .collect();
     for client in &registry.clients {
         let id = &client.client_id;
         if !ids.insert(id.clone()) {
@@ -555,13 +589,16 @@ fn check_registry(text: &str) -> Result<(), String> {
         {
             return Err(format!("{id}: private_key_jwt needs a client_auth key"));
         }
-        // Propolis grants only the scopes it knows: anything else would be dropped silently.
+        // Propolis grants only the scopes it knows or a resource declares: anything else would be
+        // dropped silently.
         if let Some(scope) = client
             .scopes
             .iter()
-            .find(|s| !KNOWN_SCOPES.contains(&s.as_str()))
+            .find(|s| !KNOWN_SCOPES.contains(&s.as_str()) && !declared.contains(s.as_str()))
         {
-            return Err(format!("{id}: scope {scope:?} is not Propolis's"));
+            return Err(format!(
+                "{id}: scope {scope:?} is neither Propolis's nor a resource's"
+            ));
         }
         // A resource server declares its own scopes.
         if let Some(scope) = client
@@ -623,7 +660,8 @@ fn the_registry_with_the_drive_passes_propolis_checks() {
             "profile",
             "email",
             "organizations",
-            "propolis:organizations.read"
+            "propolis:organizations.read",
+            "hub:publish"
         ]
     );
     assert_eq!(strings("resource_scopes"), ["drive:held.manage"]);

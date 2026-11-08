@@ -137,6 +137,8 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
                 "email",
                 "organizations",
                 "propolis:organizations.read",
+                // Its events, live frames and inbox entries, handed to the hub.
+                "hub:publish",
             ]),
             // What another product is given to manage the files it holds in the drive.
             resource_scopes: strings(&["drive:held.manage"]),
@@ -151,11 +153,30 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
     header.to_owned() + &toml::to_string(&registry).expect("a registry serialises")
 }
 
-/// The hub's event subscriptions: none until the products come.
-pub fn subscriptions() -> String {
-    "# Which service receives which events, written by ruchoir-install. None yet: the products add\n\
-     # theirs as they are installed.\n"
-        .to_owned()
+/// The hub's event subscriptions, for the products installed.
+pub fn subscriptions(instance: &Instance) -> String {
+    let mut text = String::from(
+        "# Which service receives which events, written by ruchoir-install, for the products installed.\n",
+    );
+    if instance.products.iter().any(|p| p == "drive") {
+        // The drive copies the organisations and deletes a person's data on Propolis's events.
+        text.push_str(&format!(
+            "\n[[subscription]]\nservice = \"drive\"\nendpoint = \"{}/api/v1/events\"\nkinds = [\"propolis.*\"]\n",
+            instance.url("drive")
+        ));
+    }
+    text
+}
+
+/// The origins of the products' pages: the only pages that may open a hub socket, and the hosts
+/// the hub delivers events to.
+pub fn page_origins(instance: &Instance) -> String {
+    instance
+        .products
+        .iter()
+        .map(|p| instance.url(p))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// One database and one role per service, made the first time PostgreSQL starts.
@@ -279,6 +300,7 @@ http:
 /// The compose file.
 pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
     let hub_kid = &secrets.key("hub", "auth").kid;
+    let page_origins = page_origins(instance);
     let propolis = instance.url("propolis");
     let hub = instance.url("hub");
     let aliases: String = instance
@@ -423,6 +445,7 @@ services:
       HUB_CLIENT_KEY: /keys/hub-auth.pem
       HUB_CLIENT_KEY_ID: {hub_kid}
       HUB_SUBSCRIPTIONS: /config/subscriptions.toml
+      HUB_PAGE_ORIGINS: {page_origins}
       HUB_VAPID_KEY: /keys/hub-vapid.pem
 {trust}    volumes:
       - ./hub:/config:ro
@@ -462,6 +485,8 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
     let drive = instance.url("drive");
     let propolis = instance.url("propolis");
     let kid = &secrets.key("drive", "auth").kid;
+    let events_kid = &secrets.key("drive", "events").kid;
+    let hub = instance.url("hub");
     let (trust, ca_volume) = (trust_of(instance), ca_volume_of(instance));
     let image = if instance.dev {
         "ruchoir/drive:dev"
@@ -489,8 +514,12 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
       DRIVE_S3_BUCKET: {bucket}
       DRIVE_S3_ACCESS_KEY_ID: ${{DRIVE_S3_ACCESS_KEY_ID}}
       DRIVE_S3_SECRET_ACCESS_KEY: ${{DRIVE_S3_SECRET_ACCESS_KEY}}
+      DRIVE_HUB_URL: {hub}
+      DRIVE_EVENTS_KEY: /keys/drive-events.pem
+      DRIVE_EVENTS_KEY_ID: {events_kid}
 {trust}    volumes:
       - ./keys/drive-auth.pem:/keys/drive-auth.pem:ro
+      - ./keys/drive-events.pem:/keys/drive-events.pem:ro
 {ca_volume}    networks: [ruchoir]
     depends_on:
       postgres: {{ condition: service_healthy }}
@@ -524,7 +553,7 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
 pub fn write_all(dir: &Path, instance: &Instance, secrets: &Secrets) -> Result<(), String> {
     write(dir, "manifest.json", &manifest(instance))?;
     write(dir, "propolis/clients.toml", &registry(instance, secrets))?;
-    write(dir, "hub/subscriptions.toml", &subscriptions())?;
+    write(dir, "hub/subscriptions.toml", &subscriptions(instance))?;
     write(dir, "postgres/init.sh", &postgres_init(instance))?;
     if instance.has("drive") {
         write(dir, "garage/garage.toml", &crate::garage::config())?;
