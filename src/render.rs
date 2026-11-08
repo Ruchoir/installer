@@ -1,0 +1,398 @@
+//! The files of an instance, written from it and its secrets (plan of the installer v0).
+//!
+//! - `manifest.json`: the services installed and their addresses (ADR 0004), versioned.
+//! - `propolis/clients.toml`: the clients of the instance, with their public keys (Propolis's design,
+//!   section 9.2). In phase 2, the hub.
+//! - `hub/subscriptions.toml`: which service receives which events. Empty until the products come.
+//! - `postgres/init.sh`: one database and one role per service.
+//! - `traefik/traefik.yml` and `traefik/dynamic.yml`: the proxy, routing each host to its service by
+//!   file (no Docker socket in the proxy), certificates by ACME from Actalis, or the development
+//!   certificate; access logs without query strings, where codes travel.
+//! - `compose.yaml`: everything above, run together.
+
+use std::path::Path;
+
+use serde::Serialize;
+use serde_json::json;
+
+use crate::secrets::Secrets;
+use crate::Instance;
+
+/// The manifest's format version.
+pub const MANIFEST_VERSION: u32 = 1;
+/// The network the containers share, so Propolis knows its proxy (`PROPOLIS_TRUSTED_PROXIES`).
+pub const SUBNET: &str = "10.89.0.0/24";
+/// Actalis's ACME directory (Italy): the certificate authority the installer asks (decision of
+/// 2026-11-08), rather than one outside the dependency rules.
+pub const ACTALIS_ACME: &str = "https://acme-api.actalis.com/acme/directory";
+
+fn write(dir: &Path, path: &str, text: &str) -> Result<(), String> {
+    let full = dir.join(path);
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::write(&full, text).map_err(|e| format!("{}: {e}", full.display()))
+}
+
+/// The manifest.
+pub fn manifest(instance: &Instance) -> String {
+    let services: serde_json::Map<String, serde_json::Value> = crate::ALWAYS
+        .iter()
+        .map(|s| ((*s).to_owned(), json!({ "url": instance.url(s) })))
+        .collect();
+    let manifest = json!({
+        "version": MANIFEST_VERSION,
+        "domain": instance.domain,
+        "services": services,
+    });
+    serde_json::to_string_pretty(&manifest).expect("a manifest serialises") + "\n"
+}
+
+#[derive(Serialize)]
+struct Registry {
+    client: Vec<RegistryClient>,
+}
+
+#[derive(Serialize)]
+struct RegistryClient {
+    client_id: String,
+    name: String,
+    first_party: bool,
+    resource: String,
+    grant_types: Vec<String>,
+    scopes: Vec<String>,
+    resource_scopes: Vec<String>,
+    backchannel_logout_uri: String,
+    jwks: Vec<RegistryKey>,
+}
+
+#[derive(Serialize)]
+struct RegistryKey {
+    kid: String,
+    purpose: String,
+    kty: String,
+    crv: String,
+    x: String,
+}
+
+/// Propolis's client registry.
+pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
+    let key = |purpose: &str, registered: &str| {
+        let k = secrets.key("hub", purpose);
+        RegistryKey {
+            kid: k.kid.clone(),
+            purpose: registered.to_owned(),
+            kty: "OKP".to_owned(),
+            crv: "Ed25519".to_owned(),
+            x: k.x.clone(),
+        }
+    };
+    let hub = instance.url("hub");
+    let registry = Registry {
+        client: vec![RegistryClient {
+            client_id: "hub".to_owned(),
+            name: "Hub".to_owned(),
+            first_party: true,
+            resource: hub.clone(),
+            // The hub reads Propolis's change feed in its own name.
+            grant_types: vec!["client_credentials".to_owned()],
+            scopes: vec!["propolis:organizations.read".to_owned()],
+            // What the products are given to reach the hub.
+            resource_scopes: vec!["hub:publish".to_owned()],
+            backchannel_logout_uri: format!("{hub}/api/v1/backchannel-logout"),
+            jwks: vec![key("auth", "client_auth"), key("events", "events")],
+        }],
+    };
+    let header =
+        "# The clients of this instance, written by ruchoir-install: never edit by hand, run\n\
+                  # `ruchoir-install init` again. Public keys only.\n\n";
+    header.to_owned() + &toml::to_string(&registry).expect("a registry serialises")
+}
+
+/// The hub's event subscriptions: none until the products come.
+pub fn subscriptions() -> String {
+    "# Which service receives which events, written by ruchoir-install. None yet: the products add\n\
+     # theirs as they are installed.\n"
+        .to_owned()
+}
+
+/// One database and one role per service, made the first time PostgreSQL starts.
+pub fn postgres_init() -> String {
+    let mut script = String::from(
+        "#!/bin/sh\n# One database and one role per service (ruchoir-install). Runs once, on an empty data directory.\nset -eu\n",
+    );
+    for service in crate::ALWAYS {
+        let variable = format!("{}_DB_PASSWORD", service.to_ascii_uppercase());
+        script.push_str(&format!(
+            "psql -v ON_ERROR_STOP=1 --username \"$POSTGRES_USER\" <<SQL\n\
+             CREATE ROLE {service} LOGIN PASSWORD '${variable}';\n\
+             CREATE DATABASE {service} OWNER {service};\n\
+             SQL\n"
+        ));
+    }
+    script
+}
+
+/// `id.example.org` from `https://id.example.org`.
+fn host_of(url: &str) -> &str {
+    url.trim_start_matches("https://")
+}
+
+/// Traefik's static configuration.
+pub fn traefik_static(instance: &Instance) -> String {
+    let resolver = match (&instance.dev, &instance.acme_email) {
+        (false, email) => format!(
+            r#"
+certificatesResolvers:
+  actalis:
+    acme:
+      caServer: {ACTALIS_ACME}
+      email: {}
+      storage: /acme/acme.json
+      tlsChallenge: {{}}
+"#,
+            email.as_deref().unwrap_or_default()
+        ),
+        (true, _) => String::new(),
+    };
+    format!(
+        r#"# Traefik, the proxy (Traefik Labs, France), written by ruchoir-install.
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+    http:
+      middlewares: [security@file]
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+
+# Codes and tokens travel in query strings: the access log keeps the path alone, and no header.
+accessLog:
+  fields:
+    names:
+      RequestPath: drop
+      RequestAddr: drop
+    headers:
+      defaultMode: drop
+{resolver}"#
+    )
+}
+
+/// Traefik's routes, each service's host to the service, and the headers every answer carries (the
+/// services set their own content security policies).
+pub fn traefik_dynamic(instance: &Instance) -> String {
+    let tls = if instance.dev {
+        "      tls: {}\n"
+    } else {
+        "      tls:\n        certResolver: actalis\n"
+    };
+    let mut routers = String::new();
+    let mut services = String::new();
+    for service in crate::ALWAYS {
+        let host = host_of(&instance.url(service)).to_owned();
+        routers.push_str(&format!(
+            "    {service}:\n      rule: Host(`{host}`)\n      entryPoints: [websecure]\n      service: {service}\n{tls}"
+        ));
+        services.push_str(&format!(
+            "    {service}:\n      loadBalancer:\n        servers:\n          - url: http://{service}:8080\n"
+        ));
+    }
+    // Browsers would remember HSTS for localhost long after the development instance is gone.
+    let hsts = if instance.dev {
+        ""
+    } else {
+        "        stsSeconds: 63072000
+        stsIncludeSubdomains: true
+"
+    };
+    let certificates = if instance.dev {
+        "\ntls:\n  certificates:\n    - certFile: /dev-ca/cert.pem\n      keyFile: /dev-ca/key.pem\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"# The routes, written by ruchoir-install.
+http:
+  middlewares:
+    security:
+      headers:
+{hsts}        contentTypeNosniff: true
+        referrerPolicy: no-referrer
+        customResponseHeaders:
+          Server: ""
+  routers:
+{routers}  services:
+{services}{certificates}"#
+    )
+}
+
+/// The compose file.
+pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
+    let hub_kid = &secrets.key("hub", "auth").kid;
+    let propolis = instance.url("propolis");
+    let hub = instance.url("hub");
+    let aliases: String = crate::ALWAYS
+        .iter()
+        .map(|s| format!("          - {}\n", host_of(&instance.url(s))))
+        .collect();
+    let (propolis_image, hub_image) = if instance.dev {
+        // Built from the repositories (`ruchoir-install dev` says how).
+        ("ruchoir/propolis:dev", "ruchoir/hub:dev")
+    } else {
+        (
+            "registry.ruchoir.com/propolis:latest",
+            "registry.ruchoir.com/hub:latest",
+        )
+    };
+    // In development the services reach each other's public names through the proxy and trust the
+    // development authority; mails go to the catcher.
+    let (trust, ca_volume, mail, catcher) = if instance.dev {
+        (
+            "      SSL_CERT_FILE: /dev-ca/ca.pem\n",
+            "      - ./dev-ca:/dev-ca:ro\n",
+            r#"      PROPOLIS_SMTP_HOST: mailpit
+      PROPOLIS_SMTP_PORT: "1025"
+      PROPOLIS_SMTP_TLS: none
+      PROPOLIS_SMTP_FROM: Ruchoir <no-reply@localhost>
+"#,
+            r#"  # Catches every mail in development, read at http://localhost:8025 (Mailpit, MIT).
+  mailpit:
+    image: axllent/mailpit:v1.33.1
+    networks: [ruchoir]
+    ports:
+      - "127.0.0.1:8025:8025"
+    restart: unless-stopped
+
+"#,
+        )
+    } else {
+        ("", "", "", "")
+    };
+
+    format!(
+        r#"# A Ruchoir instance, written by ruchoir-install: run `ruchoir-install init` again rather than
+# editing it, and put your own changes in compose.override.yaml, which it never touches. The secrets
+# are in .env.
+name: ruchoir
+
+networks:
+  ruchoir:
+    ipam:
+      config:
+        - subnet: {SUBNET}
+
+volumes:
+  postgres-data:
+  valkey-data:
+  acme:
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ruchoir
+      POSTGRES_PASSWORD: ${{POSTGRES_PASSWORD}}
+      PROPOLIS_DB_PASSWORD: ${{PROPOLIS_DB_PASSWORD}}
+      HUB_DB_PASSWORD: ${{HUB_DB_PASSWORD}}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./postgres/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    networks: [ruchoir]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ruchoir"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:9-alpine
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes:
+      - valkey-data:/data
+    networks: [ruchoir]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3.7.17
+    command: ["--configFile=/etc/traefik/traefik.yml"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./traefik:/etc/traefik:ro
+      - acme:/acme
+{ca_volume}    networks:
+      ruchoir:
+        # The services reach each other at their public names, through the proxy.
+        aliases:
+{aliases}    restart: unless-stopped
+
+{catcher}  propolis:
+    image: ${{PROPOLIS_IMAGE:-{propolis_image}}}
+    # The owner of this directory, who alone reads its private files.
+    user: ${{RUCHOIR_USER:-10001:10001}}
+    environment:
+      PROPOLIS_PUBLIC_URL: {propolis}
+      PROPOLIS_DATABASE_URL: postgres://propolis:${{PROPOLIS_DB_PASSWORD}}@postgres:5432/propolis
+      PROPOLIS_VALKEY_URL: redis://valkey:6379/0
+      PROPOLIS_SECRET_KEY: ${{PROPOLIS_SECRET_KEY}}
+      PROPOLIS_TRUSTED_PROXIES: {SUBNET}
+      PROPOLIS_CLIENT_REGISTRY: /config/clients.toml
+      PROPOLIS_HUB_URL: {hub}
+{mail}{trust}    volumes:
+      - ./propolis:/config:ro
+{ca_volume}    networks: [ruchoir]
+    depends_on:
+      postgres: {{ condition: service_healthy }}
+      valkey: {{ condition: service_healthy }}
+    restart: unless-stopped
+
+  hub:
+    image: ${{HUB_IMAGE:-{hub_image}}}
+    user: ${{RUCHOIR_USER:-10001:10001}}
+    environment:
+      HUB_PUBLIC_URL: {hub}
+      HUB_DATABASE_URL: postgres://hub:${{HUB_DB_PASSWORD}}@postgres:5432/hub
+      HUB_VALKEY_URL: redis://valkey:6379/1
+      HUB_TRUSTED_PROXIES: {SUBNET}
+      HUB_ISSUER: {propolis}
+      HUB_CLIENT_ID: hub
+      HUB_CLIENT_KEY: /keys/hub-auth.pem
+      HUB_CLIENT_KEY_ID: {hub_kid}
+      HUB_SUBSCRIPTIONS: /config/subscriptions.toml
+{trust}    volumes:
+      - ./hub:/config:ro
+      - ./keys/hub-auth.pem:/keys/hub-auth.pem:ro
+{ca_volume}    networks: [ruchoir]
+    depends_on:
+      postgres: {{ condition: service_healthy }}
+      valkey: {{ condition: service_healthy }}
+      propolis: {{ condition: service_started }}
+    restart: unless-stopped
+"#
+    )
+}
+
+/// Write every file but the secrets.
+pub fn write_all(dir: &Path, instance: &Instance, secrets: &Secrets) -> Result<(), String> {
+    write(dir, "manifest.json", &manifest(instance))?;
+    write(dir, "propolis/clients.toml", &registry(instance, secrets))?;
+    write(dir, "hub/subscriptions.toml", &subscriptions())?;
+    write(dir, "postgres/init.sh", &postgres_init())?;
+    write(dir, "traefik/traefik.yml", &traefik_static(instance))?;
+    write(dir, "traefik/dynamic.yml", &traefik_dynamic(instance))?;
+    write(dir, "compose.yaml", &compose(instance, secrets))?;
+    Ok(())
+}
