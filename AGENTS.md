@@ -117,7 +117,7 @@ The products are added with their phases (`init --products`).
 ### How it is built
 
 - `src/lib.rs`: the instance (domain, mode) and `init`, which writes the directory.
-- `src/secrets.rs`: what is generated once and kept (`.env`, each client service's Ed25519 keys).
+- `src/secrets.rs`: what is generated once and kept (`.env`, each client service's Ed25519 keys, the hub's VAPID key).
   Running `init` again never replaces a secret or a key: the services and their data depend on them.
 - `src/render.rs`: every other file, written anew each time from the instance and its secrets:
   `manifest.json`, `compose.yaml`, `traefik/`, `propolis/clients.toml`, `hub/subscriptions.toml`,

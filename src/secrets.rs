@@ -5,6 +5,7 @@
 //! - `keys/<service>-auth.pem` and `keys/<service>-events.pem`: each client service's Ed25519 keys, for
 //!   `private_key_jwt` and for signing its events. A private key goes to its own service alone;
 //!   Propolis's registry holds the public halves.
+//! - `keys/hub-vapid.pem`: the instance's VAPID key, which browsers subscribe against for web push.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -100,6 +101,19 @@ fn key(dir: &Path, service: &str, purpose: &str) -> Result<ServiceKey, String> {
     })
 }
 
+/// The instance's VAPID key (RFC 8292), made once: `keys/hub-vapid.pem`, a P-256 private key in
+/// PKCS#8. Browsers subscribe against its public half, so replacing it would drop every browser's
+/// subscription.
+fn vapid(dir: &Path) -> Result<(), String> {
+    let path = dir.join("keys").join("hub-vapid.pem");
+    if path.exists() {
+        return Ok(());
+    }
+    let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .map_err(|e| format!("VAPID key: {e}"))?;
+    write_private(&path, &pair.serialize_pem())
+}
+
 /// Write a file only its owner reads.
 pub fn write_private(path: &Path, text: &str) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -159,6 +173,7 @@ impl Secrets {
                 );
             }
         }
+        vapid(dir)?;
         Ok(Self { env, keys })
     }
 

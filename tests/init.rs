@@ -46,6 +46,11 @@ fn a_production_instance_is_written_whole() {
     assert!(routes.contains("stsSeconds"));
 
     assert!(!dir.path().join("dev-ca").exists());
+
+    // Web push: the hub signs with the VAPID key, which only it reads.
+    assert!(compose.contains("HUB_VAPID_KEY: /keys/hub-vapid.pem"));
+    assert!(compose.contains("./keys/hub-vapid.pem:/keys/hub-vapid.pem:ro"));
+    assert!(read(dir.path(), "keys/hub-vapid.pem").starts_with("-----BEGIN PRIVATE KEY-----"));
 }
 
 #[test]
@@ -84,6 +89,16 @@ fn the_registry_holds_the_hub_with_its_public_keys_only() {
     // The hub's key id in compose is the one registered.
     let kid = keys[0]["kid"].as_str().unwrap();
     assert!(read(dir.path(), "compose.yaml").contains(&format!("HUB_CLIENT_KEY_ID: {kid}")));
+    let scopes: Vec<&str> = hub["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        scopes,
+        ["propolis:organizations.read", "propolis:mail.digest"]
+    );
     // Propolis keeps its own keys: none is generated for it.
     assert!(!dir.path().join("keys/propolis-auth.pem").exists());
 }
@@ -94,6 +109,7 @@ fn running_init_again_keeps_the_secrets_and_the_keys() {
     init(dir.path(), &Instance::development()).unwrap();
     let kept = [
         ".env",
+        "keys/hub-vapid.pem",
         "keys/hub-auth.pem",
         "keys/hub-events.pem",
         "dev-ca/ca.pem",
@@ -147,6 +163,7 @@ fn private_files_are_for_their_owner_alone() {
     init(dir.path(), &Instance::development()).unwrap();
     for path in [
         ".env",
+        "keys/hub-vapid.pem",
         "keys/hub-auth.pem",
         "keys/hub-events.pem",
         "dev-ca/key.pem",

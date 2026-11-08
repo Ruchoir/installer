@@ -96,7 +96,11 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             resource: hub.clone(),
             // The hub reads Propolis's change feed in its own name.
             grant_types: vec!["client_credentials".to_owned()],
-            scopes: vec!["propolis:organizations.read".to_owned()],
+            // Propolis's change feed for the members' replica, and its mail for the unread digest.
+            scopes: vec![
+                "propolis:organizations.read".to_owned(),
+                "propolis:mail.digest".to_owned(),
+            ],
             // What the products are given to reach the hub.
             resource_scopes: vec!["hub:publish".to_owned()],
             backchannel_logout_uri: format!("{hub}/api/v1/backchannel-logout"),
@@ -372,9 +376,11 @@ services:
       HUB_CLIENT_KEY: /keys/hub-auth.pem
       HUB_CLIENT_KEY_ID: {hub_kid}
       HUB_SUBSCRIPTIONS: /config/subscriptions.toml
+      HUB_VAPID_KEY: /keys/hub-vapid.pem
 {trust}    volumes:
       - ./hub:/config:ro
       - ./keys/hub-auth.pem:/keys/hub-auth.pem:ro
+      - ./keys/hub-vapid.pem:/keys/hub-vapid.pem:ro
 {ca_volume}    networks: [ruchoir]
     depends_on:
       postgres: {{ condition: service_healthy }}
