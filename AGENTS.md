@@ -273,5 +273,10 @@ This repository's own decisions go in `docs/adr/`.
   `bash "$RULES/scripts/check-conventions.sh" "$RULES/common-rules.md"`, from the root.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
   `cargo deny --config "$RULES/deny.toml" check`, as the shared `rust` workflow runs them.
+- The end-to-end test (`e2e/`, Playwright, an accepted exception for tests only): with a
+  development instance up (`ruchoir-install dev --source ..`), `pnpm install` then `pnpm test` in
+  `e2e/`. In CI it checks out Propolis and the hub with `RUCHOIR_E2E_TOKEN`, a fine-grained token
+  that reads their contents only; the installer's own token reads the `@ruchoir` npm packages, which
+  grant this repository access.
 
 Licence: `AGPL-3.0-only` (`LICENSE`).
