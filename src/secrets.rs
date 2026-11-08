@@ -9,6 +9,9 @@
 //! - With the drive, in `.env`: its database password, Garage's RPC secret and admin token, and the
 //!   drive's S3 key, which the installer makes and Garage is told to accept (see [`crate::garage`]).
 //!   They are made when the drive is installed, and kept like the others.
+//! - With the calendar, in `.env`: its database password and its encryption key
+//!   (`CALENDAR_SECRET_KEY`, 64 hexadecimal characters), which keeps the tokens of people invited by
+//!   address: replacing it would void the links already mailed.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,13 +38,18 @@ pub const DRIVE_VARIABLES: [&str; 5] = [
     "DRIVE_S3_SECRET_ACCESS_KEY",
 ];
 
+/// The variables of `.env` the calendar adds, in the order they are written.
+pub const CALENDAR_VARIABLES: [&str; 2] = ["CALENDAR_DB_PASSWORD", "CALENDAR_SECRET_KEY"];
+
 /// A new value for the variable `name` of `.env`.
 fn make(name: &str) -> Result<String, String> {
     match name {
         // Garage's own key ids are `GK` and 24 hexadecimal characters: the drive's key looks like one.
         "DRIVE_S3_ACCESS_KEY_ID" => Ok(format!("GK{}", random_hex(12)?)),
         // 32 bytes in hexadecimal: Garage wants its RPC secret in exactly this form.
+        // The calendar's key is AES-256-GCM's, given as Propolis's is.
         "PROPOLIS_SECRET_KEY"
+        | "CALENDAR_SECRET_KEY"
         | "GARAGE_RPC_SECRET"
         | "GARAGE_ADMIN_TOKEN"
         | "DRIVE_S3_SECRET_ACCESS_KEY" => random_hex(32),
@@ -166,7 +174,12 @@ impl Secrets {
         } else {
             &[]
         };
-        for name in VARIABLES.iter().chain(drive) {
+        let calendar: &[&str] = if instance.has("calendar") {
+            &CALENDAR_VARIABLES
+        } else {
+            &[]
+        };
+        for name in VARIABLES.iter().chain(drive).chain(calendar) {
             if env.get(*name).is_none_or(|v| v.is_empty()) {
                 env.insert((*name).to_owned(), make(name)?);
                 changed = true;
@@ -180,10 +193,15 @@ impl Secrets {
             }
         }
         if changed {
-            let known = |k: &str| VARIABLES.contains(&k) || DRIVE_VARIABLES.contains(&k);
+            let known = |k: &str| {
+                VARIABLES.contains(&k)
+                    || DRIVE_VARIABLES.contains(&k)
+                    || CALENDAR_VARIABLES.contains(&k)
+            };
             let text: String = VARIABLES
                 .iter()
                 .chain(&DRIVE_VARIABLES)
+                .chain(&CALENDAR_VARIABLES)
                 .copied()
                 .filter(|k| env.contains_key(*k))
                 .chain(env.keys().map(String::as_str).filter(|k| !known(k)))

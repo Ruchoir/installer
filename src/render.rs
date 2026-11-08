@@ -2,8 +2,8 @@
 //!
 //! - `manifest.json`: the services installed and their addresses (ADR 0004), versioned.
 //! - `propolis/clients.toml`: the clients of the instance, with their public keys (Propolis's design,
-//!   section 9.2): the hub, and the drive when it is installed.
-//! - `hub/subscriptions.toml`: which service receives which events. Empty until the products come.
+//!   section 9.2): the hub, and each product installed.
+//! - `hub/subscriptions.toml`: which service receives which events, for the products installed.
 //! - `postgres/init.sh`: one database and one role per service.
 //! - `traefik/traefik.yml` and `traefik/dynamic.yml`: the proxy, routing each host to its service by
 //!   file (no Docker socket in the proxy), certificates by ACME from Actalis, or the development
@@ -152,6 +152,37 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             jwks: jwks("drive"),
         });
     }
+    if instance.has("calendar") {
+        let calendar = instance.url("calendar");
+        let mut scopes = vec![
+            "openid",
+            "profile",
+            "email",
+            "organizations",
+            "propolis:organizations.read",
+            // Its live frames, inbox entries and events, handed to the hub.
+            "hub:publish",
+        ];
+        if instance.has("drive") {
+            // The files of events it holds in the drive, checked and erased in its own name.
+            scopes.push("drive:held.manage");
+        }
+        client.push(RegistryClient {
+            client_id: "calendar".to_owned(),
+            name: "Calendar".to_owned(),
+            first_party: true,
+            resource: calendar.clone(),
+            // People sign in to the calendar (its own session, `/auth/*`), as to the drive.
+            redirect_uris: vec![format!("{calendar}/auth/callback")],
+            post_logout_redirect_uris: vec![format!("{calendar}/")],
+            grant_types: strings(&["authorization_code", "refresh_token", "client_credentials"]),
+            scopes: strings(&scopes),
+            // The calendar declares no scope of its own: no other service calls its API.
+            resource_scopes: Vec::new(),
+            backchannel_logout_uri: format!("{calendar}/auth/backchannel-logout"),
+            jwks: jwks("calendar"),
+        });
+    }
     let registry = Registry { client };
     let header =
         "# The clients of this instance, written by ruchoir-install: never edit by hand, run\n\
@@ -164,12 +195,26 @@ pub fn subscriptions(instance: &Instance) -> String {
     let mut text = String::from(
         "# Which service receives which events, written by ruchoir-install, for the products installed.\n",
     );
-    if instance.products.iter().any(|p| p == "drive") {
-        // The drive copies the organisations and deletes a person's data on Propolis's events.
+    let mut subscribe = |service: &str, kinds: &[&str]| {
+        let kinds: Vec<String> = kinds.iter().map(|k| format!("\"{k}\"")).collect();
         text.push_str(&format!(
-            "\n[[subscription]]\nservice = \"drive\"\nendpoint = \"{}/api/v1/events\"\nkinds = [\"propolis.*\"]\n",
-            instance.url("drive")
+            "\n[[subscription]]\nservice = \"{service}\"\nendpoint = \"{}/api/v1/events\"\nkinds = [{}]\n",
+            instance.url(service),
+            kinds.join(", ")
         ));
+    };
+    if instance.has("drive") {
+        // The drive copies the organisations and deletes a person's data on Propolis's events.
+        subscribe("drive", &["propolis.*"]);
+    }
+    if instance.has("calendar") {
+        // The calendar does the same, and with the drive takes off its events the files the drive
+        // erased (`drive.file.purged`).
+        if instance.has("drive") {
+            subscribe("calendar", &["propolis.*", "drive.file.*"]);
+        } else {
+            subscribe("calendar", &["propolis.*"]);
+        }
     }
     text
 }
@@ -180,6 +225,18 @@ pub fn page_origins(instance: &Instance) -> String {
     instance
         .products
         .iter()
+        .map(|p| instance.url(p))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The origins of the other products' pages, which the drive answers with CORS on the files they
+/// hold in it (`DRIVE_PRODUCT_ORIGINS`): every product installed but the drive.
+pub fn drive_product_origins(instance: &Instance) -> String {
+    instance
+        .products
+        .iter()
+        .filter(|p| *p != "drive")
         .map(|p| instance.url(p))
         .collect::<Vec<_>>()
         .join(",")
@@ -324,14 +381,20 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
         .into_iter()
         .map(|s| format!("          - {}\n", host_of(&instance.url(s))))
         .collect();
-    let (drive_volumes, drive_db, drive) = if instance.has("drive") {
+    let (drive_volumes, mut products_db, drive) = if instance.has("drive") {
         (
             "  garage-meta:\n  garage-data:\n",
-            "      DRIVE_DB_PASSWORD: ${DRIVE_DB_PASSWORD}\n",
+            "      DRIVE_DB_PASSWORD: ${DRIVE_DB_PASSWORD}\n".to_owned(),
             drive_services(instance, secrets),
         )
     } else {
-        ("", "", String::new())
+        ("", String::new(), String::new())
+    };
+    let calendar = if instance.has("calendar") {
+        products_db.push_str("      CALENDAR_DB_PASSWORD: ${CALENDAR_DB_PASSWORD}\n");
+        calendar_service(instance, secrets)
+    } else {
+        String::new()
     };
     let office_network = if instance.has("drive") {
         "  # The office engine's network: the engine and the drive, no route out.\n  office:\n    internal: true\n"
@@ -396,7 +459,7 @@ services:
       POSTGRES_PASSWORD: ${{POSTGRES_PASSWORD}}
       PROPOLIS_DB_PASSWORD: ${{PROPOLIS_DB_PASSWORD}}
       HUB_DB_PASSWORD: ${{HUB_DB_PASSWORD}}
-{drive_db}    volumes:
+{products_db}    volumes:
       - postgres-data:/var/lib/postgresql
       - ./postgres/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
     networks: [ruchoir]
@@ -478,7 +541,7 @@ services:
       valkey: {{ condition: service_healthy }}
       propolis: {{ condition: service_started }}
     restart: unless-stopped
-{drive}"#
+{drive}{calendar}"#
     )
 }
 
@@ -518,6 +581,13 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
     let garage = crate::garage::IMAGE;
     let bucket = crate::garage::BUCKET;
     let office_env = crate::office::drive_env(&instance.domain);
+    // The other products' pages, which upload and read the files they hold in the drive.
+    let origins = drive_product_origins(instance);
+    let product_origins = if origins.is_empty() {
+        String::new()
+    } else {
+        format!("      DRIVE_PRODUCT_ORIGINS: {origins}\n")
+    };
     let office = crate::office::service();
     format!(
         r#"
@@ -541,7 +611,7 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
       DRIVE_HUB_URL: {hub}
       DRIVE_EVENTS_KEY: /keys/drive-events.pem
       DRIVE_EVENTS_KEY_ID: {events_kid}
-{office_env}{trust}    volumes:
+{office_env}{product_origins}{trust}    volumes:
       - ./keys/drive-auth.pem:/keys/drive-auth.pem:ro
       - ./keys/drive-events.pem:/keys/drive-events.pem:ro
 {ca_volume}    # The instance's network, and the office engine's, which only the drive shares with it.
@@ -571,6 +641,68 @@ fn drive_services(instance: &Instance, secrets: &Secrets) -> String {
     read_only: true
     restart: unless-stopped
 {office}"#
+    )
+}
+
+/// The calendar, reached through the proxy alone. Its database password and encryption key come
+/// from `.env`. It mails people invited by address: in development through the catcher, in
+/// production through the relay an operator sets in `compose.override.yaml` (`CALENDAR_SMTP_*`),
+/// and without one the mails are logged, never sent.
+fn calendar_service(instance: &Instance, secrets: &Secrets) -> String {
+    let calendar = instance.url("calendar");
+    let propolis = instance.url("propolis");
+    let hub = instance.url("hub");
+    let kid = &secrets.key("calendar", "auth").kid;
+    let events_kid = &secrets.key("calendar", "events").kid;
+    let (trust, ca_volume) = (trust_of(instance), ca_volume_of(instance));
+    let image = if instance.dev {
+        "ruchoir/calendar:dev"
+    } else {
+        "registry.ruchoir.com/calendar:latest"
+    };
+    // With the drive, the files of events are kept there.
+    let drive = if instance.has("drive") {
+        format!("      CALENDAR_DRIVE_URL: {}\n", instance.url("drive"))
+    } else {
+        String::new()
+    };
+    let mail = if instance.dev {
+        r#"      CALENDAR_SMTP_HOST: mailpit
+      CALENDAR_SMTP_PORT: "1025"
+      CALENDAR_SMTP_TLS: none
+      CALENDAR_SMTP_FROM: Ruchoir <no-reply@localhost>
+"#
+    } else {
+        ""
+    };
+    format!(
+        r#"
+  calendar:
+    image: ${{CALENDAR_IMAGE:-{image}}}
+    user: ${{RUCHOIR_USER:-10001:10001}}
+    environment:
+      CALENDAR_PUBLIC_URL: {calendar}
+      CALENDAR_DATABASE_URL: postgres://calendar:${{CALENDAR_DB_PASSWORD}}@postgres:5432/calendar
+      CALENDAR_VALKEY_URL: redis://valkey:6379/3
+      CALENDAR_TRUSTED_PROXIES: {SUBNET}
+      CALENDAR_ISSUER: {propolis}
+      CALENDAR_CLIENT_ID: calendar
+      CALENDAR_CLIENT_KEY: /keys/calendar-auth.pem
+      CALENDAR_CLIENT_KEY_ID: {kid}
+      CALENDAR_HUB_URL: {hub}
+      CALENDAR_EVENTS_KEY: /keys/calendar-events.pem
+      CALENDAR_EVENTS_KEY_ID: {events_kid}
+      CALENDAR_SECRET_KEY: ${{CALENDAR_SECRET_KEY}}
+{drive}{mail}{trust}    volumes:
+      - ./keys/calendar-auth.pem:/keys/calendar-auth.pem:ro
+      - ./keys/calendar-events.pem:/keys/calendar-events.pem:ro
+{ca_volume}    networks: [ruchoir]
+    depends_on:
+      postgres: {{ condition: service_healthy }}
+      valkey: {{ condition: service_healthy }}
+      propolis: {{ condition: service_started }}
+    restart: unless-stopped
+"#
     )
 }
 

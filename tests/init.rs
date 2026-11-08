@@ -563,8 +563,8 @@ fn the_drive_talks_to_the_hub_and_hears_propolis() {
 
 #[test]
 fn an_unknown_product_is_refused() {
-    let error = production().with_products(&["calendar"]).unwrap_err();
-    assert!(error.contains("\"calendar\" is not a product"), "{error}");
+    let error = production().with_products(&["chat"]).unwrap_err();
+    assert!(error.contains("\"chat\" is not a product"), "{error}");
     let dir = tempfile::tempdir().unwrap();
     assert!(ruchoir_install::products_kept(dir.path(), &["drive", "chess"]).is_err());
     // Names are read without regard to case or spaces, and once.
@@ -849,4 +849,442 @@ fn garage_is_prepared_with_the_drives_key() {
             format!("bucket allow --read --write --owner drive --key {id}"),
         ]
     );
+}
+
+// ---- The calendar, alone or with the drive ----
+
+fn with_calendar(instance: Instance) -> Instance {
+    instance.with_products(&["calendar"]).unwrap()
+}
+
+fn with_drive_and_calendar(instance: Instance) -> Instance {
+    instance.with_products(&["calendar", "drive"]).unwrap()
+}
+
+/// The value of `name` in the environment of compose's `service`, from its first line to the
+/// blank line that ends it.
+fn compose_env(compose: &str, service: &str, name: &str) -> Option<String> {
+    let start = compose.find(&format!("\n  {service}:\n"))? + 1;
+    let rest = &compose[start..];
+    let end = rest.find("\n\n").unwrap_or(rest.len());
+    rest[..end].lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(&format!("{name}: "))
+            .map(str::to_owned)
+    })
+}
+
+#[test]
+fn the_calendar_gets_its_secrets_and_keys_and_keeps_them() {
+    for instance in [
+        with_calendar(production()),
+        with_drive_and_calendar(production()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let env = env_of(dir.path());
+        assert!(hex(&env["CALENDAR_SECRET_KEY"], 64));
+        assert!(hex(&env["CALENDAR_DB_PASSWORD"], 48));
+        assert_ne!(env["CALENDAR_SECRET_KEY"], env["PROPOLIS_SECRET_KEY"]);
+        assert!(
+            read(dir.path(), "keys/calendar-auth.pem").starts_with("-----BEGIN PRIVATE KEY-----")
+        );
+        assert!(read(dir.path(), "keys/calendar-auth.kid").starts_with("calendar-auth-"));
+        assert!(read(dir.path(), "keys/calendar-events.kid").starts_with("calendar-events-"));
+
+        let kept = [
+            ".env",
+            "keys/calendar-auth.pem",
+            "keys/calendar-auth.kid",
+            "keys/calendar-events.pem",
+            "keys/calendar-events.kid",
+        ];
+        let before: Vec<String> = kept.iter().map(|p| read(dir.path(), p)).collect();
+        // Run again without naming it: the manifest keeps it.
+        let products = ruchoir_install::products_kept(dir.path(), &[] as &[&str]).unwrap();
+        assert_eq!(products, instance.products);
+        init(dir.path(), &production().with_products(&products).unwrap()).unwrap();
+        let after: Vec<String> = kept.iter().map(|p| read(dir.path(), p)).collect();
+        assert_eq!(before, after);
+    }
+}
+
+#[test]
+fn the_calendar_is_added_beside_the_drive_without_touching_it() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_drive(production())).unwrap();
+    let env = env_of(dir.path());
+    assert!(!env.contains_key("CALENDAR_SECRET_KEY"));
+    let drive_key = read(dir.path(), "keys/drive-auth.pem");
+
+    let products = ruchoir_install::products_kept(dir.path(), &["calendar"]).unwrap();
+    assert_eq!(products, ["drive", "calendar"]);
+    init(dir.path(), &production().with_products(&products).unwrap()).unwrap();
+    let added = env_of(dir.path());
+    for (name, value) in &env {
+        assert_eq!(&added[name], value, "{name} changed");
+    }
+    assert!(added.contains_key("CALENDAR_DB_PASSWORD"));
+    assert!(added.contains_key("CALENDAR_SECRET_KEY"));
+    assert_eq!(drive_key, read(dir.path(), "keys/drive-auth.pem"));
+}
+
+#[test]
+fn the_compose_file_runs_the_calendar_with_secrets_by_name() {
+    for instance in [
+        with_calendar(production()),
+        with_drive_and_calendar(production()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let compose = read(dir.path(), "compose.yaml");
+        let kid = read(dir.path(), "keys/calendar-auth.kid");
+        let events_kid = read(dir.path(), "keys/calendar-events.kid");
+        for line in [
+            "  calendar:\n    image: ${CALENDAR_IMAGE:-registry.ruchoir.com/calendar:latest}\n    user: ${RUCHOIR_USER:-10001:10001}\n",
+            "CALENDAR_PUBLIC_URL: https://calendar.example.org",
+            "CALENDAR_DATABASE_URL: postgres://calendar:${CALENDAR_DB_PASSWORD}@postgres:5432/calendar",
+            "CALENDAR_VALKEY_URL: redis://valkey:6379/3",
+            "CALENDAR_TRUSTED_PROXIES: 10.89.0.0/24",
+            "CALENDAR_ISSUER: https://id.example.org",
+            "CALENDAR_CLIENT_ID: calendar",
+            "CALENDAR_CLIENT_KEY: /keys/calendar-auth.pem",
+            &format!("CALENDAR_CLIENT_KEY_ID: {kid}"),
+            "CALENDAR_HUB_URL: https://hub.example.org",
+            "CALENDAR_EVENTS_KEY: /keys/calendar-events.pem",
+            &format!("CALENDAR_EVENTS_KEY_ID: {events_kid}"),
+            "CALENDAR_SECRET_KEY: ${CALENDAR_SECRET_KEY}",
+            "./keys/calendar-auth.pem:/keys/calendar-auth.pem:ro",
+            "./keys/calendar-events.pem:/keys/calendar-events.pem:ro",
+            "CALENDAR_DB_PASSWORD: ${CALENDAR_DB_PASSWORD}",
+            "- calendar.example.org",
+        ] {
+            assert!(compose.contains(line), "missing: {line}");
+        }
+        // Each product has a Valkey database of its own.
+        assert_eq!(compose.matches("redis://valkey:6379/3").count(), 1);
+        // In production the relay is the operator's (compose.override.yaml): without it, the
+        // invitations are logged.
+        assert!(!compose.contains("CALENDAR_SMTP_"));
+        assert!(!compose.contains("SSL_CERT_FILE"));
+        assert_eq!(compose.matches("ports:").count(), 1);
+        for (name, value) in env_of(dir.path()) {
+            if name != "RUCHOIR_USER" {
+                assert!(!compose.contains(&value), "{name} is inline");
+            }
+        }
+        // The private keys stay out of the registry and compose alike.
+        let pem = read(dir.path(), "keys/calendar-auth.pem");
+        let body = pem.lines().nth(1).unwrap();
+        assert!(!compose.contains(body));
+        assert!(!read(dir.path(), "propolis/clients.toml").contains(body));
+
+        let drive = compose_env(&compose, "calendar", "CALENDAR_DRIVE_URL");
+        if instance.has("drive") {
+            assert_eq!(drive.as_deref(), Some("https://drive.example.org"));
+        } else {
+            assert_eq!(drive, None);
+            assert!(!compose.contains("drive"));
+        }
+
+        let script = read(dir.path(), "postgres/init.sh");
+        assert!(script.contains("CREATE ROLE calendar LOGIN PASSWORD '$CALENDAR_DB_PASSWORD';"));
+        assert!(script.contains("CREATE DATABASE calendar OWNER calendar;"));
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&read(dir.path(), "manifest.json")).unwrap();
+        assert_eq!(
+            manifest["services"]["calendar"]["url"],
+            "https://calendar.example.org"
+        );
+        assert_eq!(
+            ruchoir_install::installed_products(dir.path()).unwrap(),
+            instance.products
+        );
+        let routes = read(dir.path(), "traefik/dynamic.yml");
+        assert!(routes.contains(
+            "    calendar:\n      rule: Host(`calendar.example.org`)\n      entryPoints: [websecure]\n      service: calendar\n      tls:\n        certResolver: actalis\n"
+        ));
+        assert!(routes.contains("- url: http://calendar:8080"));
+    }
+}
+
+#[test]
+fn a_development_calendar_is_built_here_mails_the_catcher_and_trusts_the_local_authority() {
+    for (instance, trusting) in [
+        (with_calendar(Instance::development()), 3),
+        (with_drive_and_calendar(Instance::development()), 4),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let compose = read(dir.path(), "compose.yaml");
+        let get = |name: &str| compose_env(&compose, "calendar", name);
+        assert!(compose.contains("image: ${CALENDAR_IMAGE:-ruchoir/calendar:dev}"));
+        assert_eq!(
+            get("CALENDAR_PUBLIC_URL").as_deref(),
+            Some("https://calendar.localhost")
+        );
+        assert_eq!(get("CALENDAR_SMTP_HOST").as_deref(), Some("mailpit"));
+        assert_eq!(get("CALENDAR_SMTP_PORT").as_deref(), Some("\"1025\""));
+        assert_eq!(get("CALENDAR_SMTP_TLS").as_deref(), Some("none"));
+        assert_eq!(
+            get("CALENDAR_SMTP_FROM").as_deref(),
+            Some("Ruchoir <no-reply@localhost>")
+        );
+        assert_eq!(get("SSL_CERT_FILE").as_deref(), Some("/dev-ca/ca.pem"));
+        assert_eq!(
+            compose.matches("SSL_CERT_FILE: /dev-ca/ca.pem").count(),
+            trusting
+        );
+        let service = &compose[compose.find("\n  calendar:\n").unwrap()..];
+        assert!(service.contains("- ./dev-ca:/dev-ca:ro"));
+        assert!(compose.contains("- calendar.localhost"));
+        assert!(read(dir.path(), "traefik/dynamic.yml").contains("Host(`calendar.localhost`)"));
+        assert!(read(dir.path(), "dev-ca/names").contains("calendar.localhost\n"));
+    }
+    let names = ruchoir_install::dev_ca::names("localhost", &["propolis", "hub", "calendar"]);
+    assert!(names.contains(&"calendar.localhost".to_owned()));
+}
+
+#[test]
+fn the_registry_with_the_calendar_passes_propolis_checks() {
+    for (instance, held) in [
+        (with_calendar(production()), false),
+        (with_drive_and_calendar(production()), true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let text = read(dir.path(), "propolis/clients.toml");
+        check_registry(&text).unwrap();
+
+        let registry: toml::Table = text.parse().unwrap();
+        let clients = registry["client"].as_array().unwrap();
+        assert_eq!(clients.len(), if held { 3 } else { 2 });
+        let calendar = clients.last().unwrap().as_table().unwrap();
+        let strings = |name: &str| -> Vec<&str> {
+            calendar[name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect()
+        };
+        assert_eq!(calendar["client_id"].as_str(), Some("calendar"));
+        assert_eq!(calendar["first_party"].as_bool(), Some(true));
+        assert_eq!(
+            calendar["resource"].as_str(),
+            Some("https://calendar.example.org")
+        );
+        assert_eq!(
+            strings("grant_types"),
+            ["authorization_code", "refresh_token", "client_credentials"]
+        );
+        assert_eq!(
+            strings("redirect_uris"),
+            ["https://calendar.example.org/auth/callback"]
+        );
+        assert_eq!(
+            strings("post_logout_redirect_uris"),
+            ["https://calendar.example.org/"]
+        );
+        assert_eq!(
+            calendar["backchannel_logout_uri"].as_str(),
+            Some("https://calendar.example.org/auth/backchannel-logout")
+        );
+        let mut scopes = vec![
+            "openid",
+            "profile",
+            "email",
+            "organizations",
+            "propolis:organizations.read",
+            "hub:publish",
+        ];
+        if held {
+            scopes.push("drive:held.manage");
+        }
+        assert_eq!(strings("scopes"), scopes);
+        // The calendar declares no scope of its own.
+        assert!(strings("resource_scopes").is_empty());
+        let kids: Vec<&str> = calendar["jwks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k["kid"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kids,
+            [
+                read(dir.path(), "keys/calendar-auth.kid").trim(),
+                read(dir.path(), "keys/calendar-events.kid").trim()
+            ]
+        );
+    }
+
+    // Without the drive, no resource declares `drive:held.manage`: Propolis would refuse it.
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_calendar(production())).unwrap();
+    let text = read(dir.path(), "propolis/clients.toml");
+    let mut registry: toml::Table = text.parse().unwrap();
+    let calendar = registry["client"].as_array_mut().unwrap()[1]
+        .as_table_mut()
+        .unwrap();
+    calendar["scopes"]
+        .as_array_mut()
+        .unwrap()
+        .push("drive:held.manage".into());
+    let asking = toml::to_string(&registry).unwrap();
+    // Written again unchanged, the registry still passes: the scope alone is refused.
+    check_registry(&toml::to_string(&text.parse::<toml::Table>().unwrap()).unwrap()).unwrap();
+    assert!(check_registry(&asking).is_err());
+}
+
+// ---- The hub's check of its subscriptions, rewritten here (`hub/src/events.rs`,
+// `Subscriptions::parse`): a change on either side must be made on both. ----
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckedSubscriptions {
+    #[serde(default, rename = "subscription")]
+    subscriptions: Vec<CheckedSubscription>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckedSubscription {
+    service: String,
+    endpoint: String,
+    kinds: Vec<String>,
+}
+
+/// A kind, roughly as `ruchoir_events::Kind` takes it: dotted lowercase segments, three or more for
+/// an exact kind; a pattern is a namespace followed by `.*`.
+fn valid_kind(kind: &str) -> bool {
+    let segment = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    };
+    match kind.strip_suffix(".*") {
+        Some(namespace) => namespace.split('.').all(segment),
+        None => kind.split('.').count() >= 3 && kind.split('.').all(segment),
+    }
+}
+
+fn check_subscriptions(text: &str, origins: &[&str]) -> Result<CheckedSubscriptions, String> {
+    let file: CheckedSubscriptions = toml::from_str(text).map_err(|e| e.to_string())?;
+    for sub in &file.subscriptions {
+        let on_instance = origins
+            .iter()
+            .any(|origin| sub.endpoint.starts_with(&format!("{origin}/")));
+        if !sub.endpoint.starts_with("https://") || !on_instance {
+            return Err(format!(
+                "{}: {} is off the instance",
+                sub.service, sub.endpoint
+            ));
+        }
+        if let Some(kind) = sub.kinds.iter().find(|k| !valid_kind(k)) {
+            return Err(format!("{}: {kind:?} is not a kind", sub.service));
+        }
+    }
+    Ok(file)
+}
+
+#[test]
+fn the_hub_delivers_to_the_calendar_and_lets_its_pages_in() {
+    for instance in [
+        with_calendar(production()),
+        with_drive_and_calendar(production()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let compose = read(dir.path(), "compose.yaml");
+        let origins = compose_env(&compose, "hub", "HUB_PAGE_ORIGINS").unwrap();
+        let origins: Vec<&str> = origins.split(',').collect();
+        let subscriptions =
+            check_subscriptions(&read(dir.path(), "hub/subscriptions.toml"), &origins).unwrap();
+        let by_service: BTreeMap<&str, (&str, Vec<&str>)> = subscriptions
+            .subscriptions
+            .iter()
+            .map(|s| {
+                (
+                    s.service.as_str(),
+                    (
+                        s.endpoint.as_str(),
+                        s.kinds.iter().map(String::as_str).collect(),
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(by_service.len(), subscriptions.subscriptions.len());
+        let calendar = &by_service["calendar"];
+        assert_eq!(calendar.0, "https://calendar.example.org/api/v1/events");
+
+        let drive_origins = compose_env(&compose, "drive", "DRIVE_PRODUCT_ORIGINS");
+        if instance.has("drive") {
+            assert_eq!(
+                origins,
+                ["https://drive.example.org", "https://calendar.example.org"]
+            );
+            assert_eq!(calendar.1, ["propolis.*", "drive.file.*"]);
+            assert_eq!(
+                by_service["drive"],
+                (
+                    "https://drive.example.org/api/v1/events",
+                    vec!["propolis.*"]
+                )
+            );
+            // The drive answers the calendar's pages with CORS on the files it holds there.
+            assert_eq!(
+                drive_origins.as_deref(),
+                Some("https://calendar.example.org")
+            );
+        } else {
+            assert_eq!(origins, ["https://calendar.example.org"]);
+            assert_eq!(calendar.1, ["propolis.*"]);
+            assert!(!by_service.contains_key("drive"));
+            assert_eq!(drive_origins, None);
+        }
+        assert_eq!(
+            ruchoir_install::render::page_origins(&instance),
+            origins.join(",")
+        );
+    }
+
+    // The rewritten check refuses an endpoint off the instance and a kind that is not one.
+    let text = ruchoir_install::render::subscriptions(&with_calendar(production()));
+    let origins = ["https://calendar.example.org"];
+    assert!(check_subscriptions(&text, &origins).is_ok());
+    assert!(check_subscriptions(&text, &["https://drive.example.org"]).is_err());
+    assert!(check_subscriptions(&text.replace("propolis.*", "Propolis.*"), &origins).is_err());
+    assert!(check_subscriptions(&text.replace("kinds", "kind"), &origins).is_err());
+}
+
+#[test]
+fn without_the_calendar_nothing_of_it_appears() {
+    for instance in [production(), with_drive(production())] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        for path in [
+            "compose.yaml",
+            "traefik/dynamic.yml",
+            "postgres/init.sh",
+            "propolis/clients.toml",
+            "hub/subscriptions.toml",
+            "manifest.json",
+            ".env",
+        ] {
+            assert!(
+                !read(dir.path(), path).to_lowercase().contains("calendar"),
+                "{path} names the calendar"
+            );
+        }
+        assert!(!dir.path().join("keys/calendar-auth.pem").exists());
+        assert!(!dir.path().join("keys/calendar-events.pem").exists());
+        // The drive has no other product's pages to answer.
+        assert!(!read(dir.path(), "compose.yaml").contains("DRIVE_PRODUCT_ORIGINS"));
+        assert!(ruchoir_install::render::drive_product_origins(&instance).is_empty());
+    }
+    let dev = tempfile::tempdir().unwrap();
+    init(dev.path(), &with_drive(Instance::development())).unwrap();
+    assert!(!read(dev.path(), "dev-ca/names").contains("calendar"));
 }
