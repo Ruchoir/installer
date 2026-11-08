@@ -1,10 +1,11 @@
 //! `ruchoir-install`: sets up a Ruchoir instance in a directory and runs it with Docker Compose.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Output};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use ruchoir_install::{init, Instance};
+use ruchoir_install::{garage, init, installed_products, products_kept, secrets, Instance};
 
 #[derive(Parser)]
 #[command(name = "ruchoir-install", version, about)]
@@ -18,20 +19,22 @@ enum Commands {
     /// Write the instance's directory. Run again, it keeps the secrets and the keys and writes every
     /// other file anew.
     Init {
-        /// The domain the services live under: Propolis at `id.<domain>`, the hub at `hub.<domain>`.
+        /// The domain the services live under: Propolis at `id.<domain>`, the hub at `hub.<domain>`,
+        /// the drive at `drive.<domain>`.
         #[arg(long)]
         domain: String,
         /// The address the certificate authority (Actalis) writes to about the certificates.
         #[arg(long)]
         acme_email: Option<String>,
-        /// The products to install besides Propolis and the hub (none is available yet).
+        /// The products to install besides Propolis and the hub: `drive`. Those installed before are
+        /// kept.
         #[arg(long, value_delimiter = ',')]
         products: Vec<String>,
         /// The instance's directory.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Start the instance in the background.
+    /// Start the instance in the background, and prepare the drive's object store.
     Up {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
@@ -46,8 +49,13 @@ enum Commands {
     Dev {
         #[arg(long, default_value = "ruchoir-dev")]
         dir: PathBuf,
-        /// A directory holding the `propolis` and `hub` repositories: their images are built from it
-        /// first. Without it, the `ruchoir/propolis:dev` and `ruchoir/hub:dev` images must exist.
+        /// The products to install besides Propolis and the hub: `drive`. Those installed before are
+        /// kept.
+        #[arg(long, value_delimiter = ',')]
+        products: Vec<String>,
+        /// A directory holding the repositories of the services (`propolis`, `hub`, and those of the
+        /// products): their images are built from it first. Without it, the `ruchoir/<service>:dev`
+        /// images must exist.
         #[arg(long)]
         source: Option<PathBuf>,
         /// Write the directory and build the images, without starting anything.
@@ -74,37 +82,46 @@ fn run(command: Commands) -> Result<(), String> {
             products,
             dir,
         } => {
-            if let Some(product) = products.first() {
-                return Err(format!("{product:?} cannot be installed yet"));
-            }
-            let instance = Instance::production(&domain, acme_email)?;
+            let instance = Instance::production(&domain, acme_email)?
+                .with_products(&products_kept(&dir, &products)?)?;
             init(&dir, &instance)?;
+            let hosts: Vec<String> = instance
+                .services()
+                .into_iter()
+                .map(|s| instance.url(s))
+                .collect();
             println!(
-                "{} is ready: point {} and {} at this machine, then run `ruchoir-install up --dir {}`.",
+                "{} is ready: point {} at this machine, then run `ruchoir-install up --dir {}`.",
                 dir.display(),
-                instance.url("propolis"),
-                instance.url("hub"),
+                hosts.join(", "),
                 dir.display()
             );
             Ok(())
         }
-        Commands::Up { dir } => compose(&dir, &["up", "--detach", "--wait"]),
+        Commands::Up { dir } => {
+            compose(&dir, &["up", "--detach", "--wait"])?;
+            prepare(&dir)
+        }
         Commands::Down { dir } => compose(&dir, &["down"]),
         Commands::Dev {
             dir,
+            products,
             source,
             no_start,
         } => {
-            let instance = Instance::development();
+            let instance =
+                Instance::development().with_products(&products_kept(&dir, &products)?)?;
             init(&dir, &instance)?;
             if let Some(source) = source {
-                build(&source, "propolis")?;
-                build(&source, "hub")?;
+                for service in instance.services() {
+                    build(&source, service)?;
+                }
             }
             if no_start {
                 return Ok(());
             }
             compose(&dir, &["up", "--detach", "--wait"])?;
+            prepare(&dir)?;
             println!(
                 "Ruchoir runs at {}. Trust {} in your browser; mails are read at http://localhost:8025.",
                 instance.url("propolis"),
@@ -113,6 +130,14 @@ fn run(command: Commands) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// What a started instance needs before it is used: with the drive, Garage's layout, key and bucket.
+fn prepare(dir: &Path) -> Result<(), String> {
+    if installed_products(dir)?.iter().any(|p| p == "drive") {
+        bootstrap_garage(dir)?;
+    }
+    Ok(())
 }
 
 /// `docker compose` on the instance's directory.
@@ -130,6 +155,68 @@ fn compose(dir: &Path, args: &[&str]) -> Result<(), String> {
             .arg("compose")
             .args(args),
     )
+}
+
+/// Garage's command line in its container, its output captured. The image has no shell.
+fn garage_cli(dir: &Path, args: &[&str]) -> Result<Output, String> {
+    Command::new("docker")
+        .current_dir(dir)
+        .args(["compose", "exec", "-T", "garage", "/garage"])
+        .args(args)
+        .output()
+        .map_err(|e| format!("docker could not be run: {e}"))
+}
+
+fn text(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// Prepare Garage for the drive (see `ruchoir_install::garage`): safe to run on every start.
+fn bootstrap_garage(dir: &Path) -> Result<(), String> {
+    let env = secrets::read_env(&dir.join(".env"));
+    let get = |name: &str| {
+        env.get(name)
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .ok_or_else(|| format!("{name} is missing from .env: run `ruchoir-install init` again"))
+    };
+    let (key_id, secret) = (
+        get("DRIVE_S3_ACCESS_KEY_ID")?,
+        get("DRIVE_S3_SECRET_ACCESS_KEY")?,
+    );
+
+    // Garage answers a few seconds after its container starts.
+    let mut attempts = 0;
+    while !garage_cli(dir, &["status"])?.status.success() {
+        attempts += 1;
+        if attempts >= 30 {
+            return Err("Garage does not answer: see `docker compose logs garage`".to_owned());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let output = garage_cli(dir, &["node", "id", "-q"])?;
+    let node = garage::node_id(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| format!("Garage's node id could not be read: {}", text(&output)))?;
+    let output = garage_cli(dir, &["layout", "show"])?;
+    let version = garage::layout_version(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| format!("Garage's layout could not be read: {}", text(&output)))?;
+
+    for step in garage::bootstrap(&node, version, &key_id, &secret) {
+        let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
+        let output = garage_cli(dir, &args)?;
+        let said = text(&output);
+        let done_before = step.done_already.is_some_and(|s| said.contains(s));
+        if !output.status.success() && !done_before {
+            // What Garage says names the key at most, never its secret.
+            return Err(format!("Garage could not {}: {}", step.what, said.trim()));
+        }
+    }
+    println!("The drive's object store is ready.");
+    Ok(())
 }
 
 /// Build a service's development image from its repository. Propolis's pages need the organization's

@@ -6,12 +6,17 @@
 //!   `private_key_jwt` and for signing its events. A private key goes to its own service alone;
 //!   Propolis's registry holds the public halves.
 //! - `keys/hub-vapid.pem`: the instance's VAPID key, which browsers subscribe against for web push.
+//! - With the drive, in `.env`: its database password, Garage's RPC secret and admin token, and the
+//!   drive's S3 key, which the installer makes and Garage is told to accept (see [`crate::garage`]).
+//!   They are made when the drive is installed, and kept like the others.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use base64::Engine as _;
 use jwt_simple::prelude::Ed25519KeyPair;
+
+use crate::Instance;
 
 /// The variables of `.env`, in the order they are written.
 pub const VARIABLES: [&str; 4] = [
@@ -20,6 +25,29 @@ pub const VARIABLES: [&str; 4] = [
     "HUB_DB_PASSWORD",
     "PROPOLIS_SECRET_KEY",
 ];
+
+/// The variables of `.env` the drive adds, in the order they are written.
+pub const DRIVE_VARIABLES: [&str; 5] = [
+    "DRIVE_DB_PASSWORD",
+    "GARAGE_RPC_SECRET",
+    "GARAGE_ADMIN_TOKEN",
+    "DRIVE_S3_ACCESS_KEY_ID",
+    "DRIVE_S3_SECRET_ACCESS_KEY",
+];
+
+/// A new value for the variable `name` of `.env`.
+fn make(name: &str) -> Result<String, String> {
+    match name {
+        // Garage's own key ids are `GK` and 24 hexadecimal characters: the drive's key looks like one.
+        "DRIVE_S3_ACCESS_KEY_ID" => Ok(format!("GK{}", random_hex(12)?)),
+        // 32 bytes in hexadecimal: Garage wants its RPC secret in exactly this form.
+        "PROPOLIS_SECRET_KEY"
+        | "GARAGE_RPC_SECRET"
+        | "GARAGE_ADMIN_TOKEN"
+        | "DRIVE_S3_SECRET_ACCESS_KEY" => random_hex(32),
+        _ => random_hex(24),
+    }
+}
 
 /// The user the services run as, `uid:gid`: the owner of the instance's directory.
 pub const USER: &str = "RUCHOIR_USER";
@@ -64,7 +92,7 @@ fn random_hex(bytes: usize) -> Result<String, String> {
 }
 
 /// Read `.env` as `NAME=value` lines.
-fn read_env(path: &Path) -> BTreeMap<String, String> {
+pub fn read_env(path: &Path) -> BTreeMap<String, String> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -127,19 +155,20 @@ pub fn write_private(path: &Path, text: &str) -> Result<(), String> {
 }
 
 impl Secrets {
-    /// The secrets of the instance in `dir`, making what is missing and keeping what is there.
-    pub fn load_or_make(dir: &Path) -> Result<Self, String> {
+    /// The secrets of `instance` in `dir`, making what is missing and keeping what is there. A
+    /// product's secrets are made when it is installed.
+    pub fn load_or_make(dir: &Path, instance: &Instance) -> Result<Self, String> {
         let env_path = dir.join(".env");
         let mut env = read_env(&env_path);
         let mut changed = false;
-        for name in VARIABLES {
-            if env.get(name).is_none_or(|v| v.is_empty()) {
-                let bytes = if name == "PROPOLIS_SECRET_KEY" {
-                    32
-                } else {
-                    24
-                };
-                env.insert(name.to_owned(), random_hex(bytes)?);
+        let drive: &[&str] = if instance.has("drive") {
+            &DRIVE_VARIABLES
+        } else {
+            &[]
+        };
+        for name in VARIABLES.iter().chain(drive) {
+            if env.get(*name).is_none_or(|v| v.is_empty()) {
+                env.insert((*name).to_owned(), make(name)?);
                 changed = true;
             }
         }
@@ -151,24 +180,23 @@ impl Secrets {
             }
         }
         if changed {
+            let known = |k: &str| VARIABLES.contains(&k) || DRIVE_VARIABLES.contains(&k);
             let text: String = VARIABLES
                 .iter()
+                .chain(&DRIVE_VARIABLES)
                 .copied()
-                .chain(
-                    env.keys()
-                        .map(String::as_str)
-                        .filter(|k| !VARIABLES.contains(k)),
-                )
+                .filter(|k| env.contains_key(*k))
+                .chain(env.keys().map(String::as_str).filter(|k| !known(k)))
                 .map(|name| format!("{name}={}\n", env[name]))
                 .collect();
             write_private(&env_path, &text)?;
         }
         let mut keys = BTreeMap::new();
         // Propolis keeps its own keys, in its database: the registry is for its clients.
-        for service in crate::ALWAYS.iter().filter(|s| **s != "propolis") {
+        for service in instance.services().into_iter().filter(|s| *s != "propolis") {
             for purpose in ["auth", "events"] {
                 keys.insert(
-                    ((*service).to_owned(), purpose.to_owned()),
+                    (service.to_owned(), purpose.to_owned()),
                     key(dir, service, purpose)?,
                 );
             }

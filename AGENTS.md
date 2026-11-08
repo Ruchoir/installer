@@ -112,17 +112,26 @@ keeps the manifest of installed products, published at a `.well-known` address.
 
 **Status:** v0. `ruchoir-install` writes an instance's directory and runs it with Docker Compose:
 Propolis, the hub and the proxy, in production (`init`, `up`, `down`) or on `*.localhost` (`dev`).
-The products are added with their phases (`init --products`).
+The products are added with their phases (`--products`): the drive, with Garage for its files.
+Euro-Office comes with the drive once the drive speaks to it.
 
 ### How it is built
 
-- `src/lib.rs`: the instance (domain, mode) and `init`, which writes the directory.
+- `src/lib.rs`: the instance (domain, mode, products) and `init`, which writes the directory. The
+  products installed are those of the manifest written last: `--products` adds to them, never
+  removes, and an `init` without it keeps them.
 - `src/secrets.rs`: what is generated once and kept (`.env`, each client service's Ed25519 keys, the hub's VAPID key).
+  A product's secrets and keys are made when it is installed: for the drive, `keys/drive-auth.pem`
+  and `keys/drive-events.pem`, its database password, Garage's RPC secret and admin token, and its
+  S3 key (`DRIVE_S3_ACCESS_KEY_ID`, `GK` and 24 hexadecimal characters as Garage makes them).
   Running `init` again never replaces a secret or a key: the services and their data depend on them.
 - `src/render.rs`: every other file, written anew each time from the instance and its secrets:
   `manifest.json`, `compose.yaml`, `traefik/`, `propolis/clients.toml`, `hub/subscriptions.toml`,
-  `postgres/init.sh`.
+  `postgres/init.sh`, and with the drive `garage/garage.toml`.
+- `src/garage.rs`: Garage, the drive's object store: its configuration, and the commands that
+  prepare a fresh one (pure functions, unit-tested).
 - `src/dev_ca.rs`: in development, a local certificate authority the proxy and the services trust.
+  Its certificate is issued again, by the same authority, when a product adds a host.
 - `src/main.rs`: the command line.
 
 ### Gotchas
@@ -135,6 +144,19 @@ The products are added with their phases (`init --products`).
 - The registry written for Propolis must pass Propolis's own check (`deny_unknown_fields`,
   `https` addresses, a `client_auth` key for `private_key_jwt`): change both together.
 - Operators put their own changes in `compose.override.yaml`, which `init` never touches.
+- A fresh Garage stores nothing until its layout is applied, the drive's key imported and the
+  `drive` bucket created and allowed to the key. `up` and `dev` do it after starting the instance,
+  through `docker compose exec -T garage /garage` (the image has no shell), and again on every start:
+  the layout is applied only while none is, and "already exists" from the key or the bucket is taken
+  as done. The commands follow Garage v2's command line, whose flags changed since v1: check them
+  against `src/garage/cli/structs.rs` of the pinned tag when bumping the image.
+- Garage's secrets stay out of `garage/garage.toml`: it reads `GARAGE_RPC_SECRET` and
+  `GARAGE_ADMIN_TOKEN` from its environment, filled from `.env`.
+- `postgres/init.sh` runs once, on an empty data directory: a product added to an instance that
+  already ran has no database yet. Create its role and database by hand with the statements of
+  `init.sh` (`docker compose exec postgres psql -U ruchoir`) until the installer does it.
+- The drive's private keys go to the drive alone: `keys/drive-auth.pem` is mounted in its
+  container, and Propolis's registry holds the public halves of both.
 
 ### Boundaries
 

@@ -2,14 +2,23 @@
 //! ADR 0004 and 0012 of `Ruchoir/.github`).
 //!
 //! - [`Instance`]: the domain, the mode (production or development) and the services installed.
-//!   Propolis and the hub are always there; the products come with their phases.
+//!   Propolis and the hub are always there; the products are chosen ([`PRODUCTS`]).
 //! - [`secrets`]: what is generated once and kept (database passwords, Propolis's encryption key,
-//!   each service's Ed25519 keys). Running `init` again keeps them.
+//!   each service's Ed25519 keys, Garage's secrets and the drive's S3 key). Running `init` again
+//!   keeps them.
 //! - [`render`]: the files the services and the proxy read, from the instance and its secrets.
+//! - [`garage`]: the object store the drive keeps its files in: its configuration, and the commands
+//!   that prepare a fresh one.
 //! - [`dev_ca`]: in development, a local certificate authority and a certificate for `*.localhost`,
 //!   which the proxy serves and the services trust.
+//!
+//! The products installed are those of the manifest written last: `init --products drive` adds the
+//! drive, and a later `init` without `--products` keeps what the manifest lists
+//! ([`products_kept`]). A product is never removed by `init`: its data would be left without a
+//! service.
 
 pub mod dev_ca;
+pub mod garage;
 pub mod render;
 pub mod secrets;
 
@@ -18,15 +27,22 @@ use std::path::Path;
 /// The services every instance has.
 pub const ALWAYS: [&str; 2] = ["propolis", "hub"];
 
+/// The products that can be installed besides Propolis and the hub.
+// When the chat comes, choosing it installs the drive too: its attachments are files of the drive.
+pub const PRODUCTS: [&str; 1] = ["drive"];
+
 /// An instance to set up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
-    /// The domain its services live under: `id.<domain>` for Propolis (ADR 0012), `hub.<domain>`.
+    /// The domain its services live under: `id.<domain>` for Propolis (ADR 0012), `hub.<domain>`,
+    /// `drive.<domain>`.
     pub domain: String,
     /// Development: `localhost`, a local certificate, a mail catcher, images built from source.
     pub dev: bool,
     /// The address certificates are asked for (ACME), in production.
     pub acme_email: Option<String>,
+    /// The products installed, in the order of [`PRODUCTS`].
+    pub products: Vec<String>,
 }
 
 impl Instance {
@@ -49,6 +65,7 @@ impl Instance {
             domain,
             dev: false,
             acme_email,
+            products: Vec::new(),
         })
     }
 
@@ -58,7 +75,28 @@ impl Instance {
             domain: "localhost".to_owned(),
             dev: true,
             acme_email: None,
+            products: Vec::new(),
         }
+    }
+
+    /// The same instance with `products` installed. A name that is not a product is refused.
+    pub fn with_products<S: AsRef<str>>(mut self, products: &[S]) -> Result<Self, String> {
+        self.products = checked_products(products)?;
+        Ok(self)
+    }
+
+    /// Whether `product` is installed.
+    pub fn has(&self, product: &str) -> bool {
+        self.products.iter().any(|p| p == product)
+    }
+
+    /// Every service of the instance: Propolis, the hub, then the products.
+    pub fn services(&self) -> Vec<&str> {
+        ALWAYS
+            .iter()
+            .copied()
+            .chain(self.products.iter().map(String::as_str))
+            .collect()
     }
 
     /// The public address of a service.
@@ -71,12 +109,66 @@ impl Instance {
     }
 }
 
+/// `products` checked and put in the order of [`PRODUCTS`], each once.
+fn checked_products<S: AsRef<str>>(products: &[S]) -> Result<Vec<String>, String> {
+    let mut asked = Vec::new();
+    for product in products {
+        let name = product.as_ref().trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        if !PRODUCTS.contains(&name.as_str()) {
+            return Err(format!(
+                "{name:?} is not a product: the products are {}",
+                PRODUCTS.join(", ")
+            ));
+        }
+        asked.push(name);
+    }
+    Ok(PRODUCTS
+        .iter()
+        .filter(|p| asked.iter().any(|a| a == *p))
+        .map(|p| (*p).to_owned())
+        .collect())
+}
+
+/// The products the manifest in `dir` lists, none when there is no manifest yet.
+pub fn installed_products(dir: &Path) -> Result<Vec<String>, String> {
+    let path = dir.join("manifest.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let manifest: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let services: Vec<&str> = manifest["services"]
+        .as_object()
+        .map(|services| services.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    checked_products(
+        &services
+            .into_iter()
+            .filter(|s| !ALWAYS.contains(s))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The products to install in `dir`: those its manifest lists, plus those `asked`. Products are only
+/// ever added: removing one is not supported yet.
+pub fn products_kept<S: AsRef<str>>(dir: &Path, asked: &[S]) -> Result<Vec<String>, String> {
+    let mut products = installed_products(dir)?;
+    products.extend(checked_products(asked)?);
+    checked_products(&products)
+}
+
 /// Write the instance's directory: secrets kept, every other file written again.
 pub fn init(dir: &Path, instance: &Instance) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let secrets = secrets::Secrets::load_or_make(dir)?;
+    let secrets = secrets::Secrets::load_or_make(dir, instance)?;
     if instance.dev {
-        dev_ca::write(dir, &instance.domain)?;
+        dev_ca::write(dir, &instance.domain, &instance.services())?;
     }
     render::write_all(dir, instance, &secrets)
 }

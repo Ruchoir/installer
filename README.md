@@ -5,7 +5,7 @@ proxy are always installed, plus the products chosen (choosing the chat also ins
 keeps the manifest of installed products, published at a `.well-known` address.
 
 > In construction: part of the restructuring of Ruchoir into separate products. Version 0 installs
-> Propolis and the hub; the products follow.
+> Propolis and the hub, and the drive when asked; the other products follow.
 
 ## Use
 
@@ -19,10 +19,22 @@ again, and everything else written anew. Propolis answers at `id.example.org`, t
 `hub.example.org`; the certificates come from Actalis by ACME. Your own changes (the SMTP relay,
 for example) go in `compose.override.yaml`, which `init` never touches.
 
-For development, with the `propolis` and `hub` repositories checked out side by side:
+The drive comes with `--products drive`, with Garage to keep its files:
 
 ```sh
-NODE_AUTH_TOKEN=... ruchoir-install dev --source ..
+ruchoir-install init --domain example.org --acme-email admin@example.org --products drive --dir /srv/ruchoir
+ruchoir-install up --dir /srv/ruchoir
+```
+
+It answers at `drive.example.org`. `up` also prepares Garage the first time (its layout, the drive's
+key and bucket), and checks it again on every start. The products asked once are kept: a later
+`init` without `--products` installs them still, and none is ever removed by `init`.
+
+For development, with the `propolis` and `hub` repositories (and `drive`, with the drive) checked
+out side by side:
+
+```sh
+NODE_AUTH_TOKEN=... ruchoir-install dev --source .. --products drive
 ```
 
 builds their images, starts the instance at `https://id.localhost`, and catches every mail at
