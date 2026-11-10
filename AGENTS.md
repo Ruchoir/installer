@@ -113,8 +113,9 @@ keeps the manifest of installed products, published at a `.well-known` address.
 **Status:** v0. `ruchoir-install` writes an instance's directory and runs it with Docker Compose:
 Propolis, the hub and the proxy, in production (`init`, `up`, `down`) or on `*.localhost` (`dev`).
 The products are added with their phases (`--products`): the drive, with Garage for its files and
-Euro-Office, its office engine, which always comes with it (phase 3 plan, decision 4), and the
-calendar, on its own or beside the drive.
+Euro-Office, its office engine, which always comes with it (phase 3 plan, decision 4), the
+calendar, on its own or beside the drive, and the chat, which always brings the drive
+(`REQUIRES` in `src/lib.rs`, applied where the products asked are checked).
 
 ### How it is built
 
@@ -128,6 +129,8 @@ calendar, on its own or beside the drive.
   For the calendar, `keys/calendar-auth.pem` and `keys/calendar-events.pem`, its database password
   and `CALENDAR_SECRET_KEY` (64 hexadecimal characters, which encrypts the tokens of people invited
   by address: replacing it voids the links already mailed).
+  For the chat, `keys/chat-auth.pem`, `keys/chat-events.pem` and its database password: it keeps no
+  encryption key of its own and sends no mail.
   Running `init` again never replaces a secret or a key: the services and their data depend on them.
 - `src/render.rs`: every other file, written anew each time from the instance and its secrets:
   `manifest.json`, `compose.yaml`, `traefik/`, `propolis/clients.toml`, `hub/subscriptions.toml`,
@@ -137,6 +140,10 @@ calendar, on its own or beside the drive.
   gets `CALENDAR_DRIVE_URL` and hears `drive.file.*` at the hub, and the drive gets the calendar's
   origin in `DRIVE_PRODUCT_ORIGINS` (`render::drive_product_origins`, every product but the drive).
   `HUB_PAGE_ORIGINS` lists every product's origin (`render::page_origins`).
+  The chat always has the drive: its client asks `drive:held.manage`, it gets `CHAT_DRIVE_URL`,
+  hears `propolis.*` and `drive.file.*`, and its origin is in `DRIVE_PRODUCT_ORIGINS`. Its client
+  declares `chat:cards.post` and `chat:channels.read` (`render::CHAT_SCOPES`); with the calendar,
+  the calendar's client asks both and the calendar gets `CALENDAR_CHAT_URL`.
 - `src/garage.rs`: Garage, the drive's object store: its configuration, and the commands that
   prepare a fresh one (pure functions, unit-tested).
 - `src/office.rs`: Euro-Office, the drive's office engine: its service, the drive's settings for it
@@ -176,15 +183,25 @@ calendar, on its own or beside the drive.
 - The drive's private keys go to the drive alone: `keys/drive-auth.pem` is mounted in its
   container, and Propolis's registry holds the public halves of both.
 - Each service has its own Valkey database index: Propolis `0`, the hub `1`, the drive `2`, the
-  calendar `3`. A new product takes the next one.
+  calendar `3`, the chat `4`. A new product takes the next one.
 - The calendar mails people invited by address. In development it uses Mailpit as Propolis does; in
   production the installer sets no relay for either (the operator's `compose.override.yaml` does),
   and without `CALENDAR_SMTP_HOST` the calendar logs those mails instead of sending them.
 - The calendar declares no resource scope of its own (no other service calls its API), so its client
   has no `resource_scopes`. It asks `drive:held.manage` only when the drive is installed: Propolis
   refuses a scope no resource of the instance declares.
-- `dev --source` builds Propolis's and the calendar's images with the npm token as the BuildKit
-  secret `npm_token` (`--secret id=npm_token,env=NODE_AUTH_TOKEN`), the id their Dockerfiles name.
+- The chat's pages open the hub's socket with a ticket the chat asks for them, with the person's
+  token exchanged at Propolis for one for the hub (ADR 0016). Its client is given the grant
+  `urn:ietf:params:oauth:grant-type:token-exchange` and a `[[client.token_exchange]]` entry, the
+  hub's resource as `audience` with no scope (the hub asks none of a person's token). The drive's
+  and the calendar's pages ask no ticket, so their clients have neither. The audience must be the
+  hub's resource exactly, and the rewritten check refuses one that is no resource of the registry.
+- The chat reads the first link of a message for its preview (`CHAT_UNFURL_ENABLED`, `true`), never
+  on its own domain and its subdomains: every host of the instance is covered, so
+  `CHAT_UNFURL_DENY_HOSTS` stays unset.
+- `dev --source` builds the images of Propolis, the drive, the calendar and the chat with the npm
+  token as the BuildKit secret `npm_token` (`--secret id=npm_token,env=NODE_AUTH_TOKEN`), the id
+  their Dockerfiles name.
 - The office editor has a hostname of its own, `office.<domain>`, which the proxy routes to the
   drive (`service: drive`), never to the engine: the drive tells the editor's requests by their
   `Host` and relays them, WebSocket included, to `http://office`. The drive refuses to start when

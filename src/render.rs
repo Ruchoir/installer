@@ -2,7 +2,8 @@
 //!
 //! - `manifest.json`: the services installed and their addresses (ADR 0004), versioned.
 //! - `propolis/clients.toml`: the clients of the instance, with their public keys (Propolis's design,
-//!   section 9.2): the hub, and each product installed.
+//!   section 9.2): the hub, and each product installed. The chat may exchange a person's token for
+//!   one for the hub, which its pages' socket tickets are asked with.
 //! - `hub/subscriptions.toml`: which service receives which events, for the products installed.
 //! - `postgres/init.sh`: one database and one role per service.
 //! - `traefik/traefik.yml` and `traefik/dynamic.yml`: the proxy, routing each host to its service by
@@ -75,7 +76,17 @@ struct RegistryClient {
     scopes: Vec<String>,
     resource_scopes: Vec<String>,
     backchannel_logout_uri: String,
+    /// The audiences it may exchange a person's token for (RFC 8693), and the scopes it may ask
+    /// there. Before the keys: TOML writes its arrays of tables last.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    token_exchange: Vec<RegistryExchange>,
     jwks: Vec<RegistryKey>,
+}
+
+#[derive(Serialize)]
+struct RegistryExchange {
+    audience: String,
+    scopes: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -90,6 +101,9 @@ struct RegistryKey {
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| (*v).to_owned()).collect()
 }
+
+/// The scopes the chat declares: posting a card in a channel, and reading a channel and who reads it.
+pub const CHAT_SCOPES: [&str; 2] = ["chat:cards.post", "chat:channels.read"];
 
 /// Propolis's client registry.
 pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
@@ -123,6 +137,7 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
         // What the products are given to reach the hub.
         resource_scopes: strings(&["hub:publish"]),
         backchannel_logout_uri: format!("{hub}/api/v1/backchannel-logout"),
+        token_exchange: Vec::new(),
         jwks: jwks("hub"),
     }];
     if instance.has("drive") {
@@ -149,6 +164,7 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             // What another product is given to manage the files it holds in the drive.
             resource_scopes: strings(&["drive:held.manage"]),
             backchannel_logout_uri: format!("{drive}/auth/backchannel-logout"),
+            token_exchange: Vec::new(),
             jwks: jwks("drive"),
         });
     }
@@ -167,6 +183,10 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             // The files of events it holds in the drive, checked and erased in its own name.
             scopes.push("drive:held.manage");
         }
+        if instance.has("chat") {
+            // Its cards posted in channels, and who reads a channel asked, in its own name.
+            scopes.extend(CHAT_SCOPES);
+        }
         client.push(RegistryClient {
             client_id: "calendar".to_owned(),
             name: "Calendar".to_owned(),
@@ -180,7 +200,48 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             // The calendar declares no scope of its own: no other service calls its API.
             resource_scopes: Vec::new(),
             backchannel_logout_uri: format!("{calendar}/auth/backchannel-logout"),
+            token_exchange: Vec::new(),
             jwks: jwks("calendar"),
+        });
+    }
+    if instance.has("chat") {
+        let chat = instance.url("chat");
+        client.push(RegistryClient {
+            client_id: "chat".to_owned(),
+            name: "Chat".to_owned(),
+            first_party: true,
+            resource: chat.clone(),
+            // People sign in to the chat (its own session, `/auth/*`), as to the drive.
+            redirect_uris: vec![format!("{chat}/auth/callback")],
+            post_logout_redirect_uris: vec![format!("{chat}/")],
+            // Its session, its members' replica read in its own name, and a person's token exchanged
+            // for one for the hub, which its pages' socket tickets are asked with.
+            grant_types: strings(&[
+                "authorization_code",
+                "refresh_token",
+                "client_credentials",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ]),
+            scopes: strings(&[
+                "openid",
+                "profile",
+                "email",
+                "organizations",
+                "propolis:organizations.read",
+                // Its live frames, inbox entries and events, handed to the hub.
+                "hub:publish",
+                // The files of messages it holds in the drive (the drive always comes with it).
+                "drive:held.manage",
+            ]),
+            // What another product is given to reach its channels: the calendar, for its cards.
+            resource_scopes: strings(&CHAT_SCOPES),
+            backchannel_logout_uri: format!("{chat}/auth/backchannel-logout"),
+            // The hub's ticket is asked with the person's token, exchanged: no scope is needed there.
+            token_exchange: vec![RegistryExchange {
+                audience: hub.clone(),
+                scopes: Vec::new(),
+            }],
+            jwks: jwks("chat"),
         });
     }
     let registry = Registry { client };
@@ -215,6 +276,10 @@ pub fn subscriptions(instance: &Instance) -> String {
         } else {
             subscribe("calendar", &["propolis.*"]);
         }
+    }
+    if instance.has("chat") {
+        // The chat does the same, and takes off its messages the files the drive erased.
+        subscribe("chat", &["propolis.*", "drive.file.*"]);
     }
     text
 }
@@ -396,6 +461,12 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
     } else {
         String::new()
     };
+    let chat = if instance.has("chat") {
+        products_db.push_str("      CHAT_DB_PASSWORD: ${CHAT_DB_PASSWORD}\n");
+        chat_service(instance, secrets)
+    } else {
+        String::new()
+    };
     let office_network = if instance.has("drive") {
         "  # The office engine's network: the engine and the drive, no route out.\n  office:\n    internal: true\n"
     } else {
@@ -541,7 +612,7 @@ services:
       valkey: {{ condition: service_healthy }}
       propolis: {{ condition: service_started }}
     restart: unless-stopped
-{drive}{calendar}"#
+{drive}{calendar}{chat}"#
     )
 }
 
@@ -666,6 +737,12 @@ fn calendar_service(instance: &Instance, secrets: &Secrets) -> String {
     } else {
         String::new()
     };
+    // With the chat, events are posted as cards in its channels.
+    let chat = if instance.has("chat") {
+        format!("      CALENDAR_CHAT_URL: {}\n", instance.url("chat"))
+    } else {
+        String::new()
+    };
     let mail = if instance.dev {
         r#"      CALENDAR_SMTP_HOST: mailpit
       CALENDAR_SMTP_PORT: "1025"
@@ -693,7 +770,7 @@ fn calendar_service(instance: &Instance, secrets: &Secrets) -> String {
       CALENDAR_EVENTS_KEY: /keys/calendar-events.pem
       CALENDAR_EVENTS_KEY_ID: {events_kid}
       CALENDAR_SECRET_KEY: ${{CALENDAR_SECRET_KEY}}
-{drive}{mail}{trust}    volumes:
+{drive}{chat}{mail}{trust}    volumes:
       - ./keys/calendar-auth.pem:/keys/calendar-auth.pem:ro
       - ./keys/calendar-events.pem:/keys/calendar-events.pem:ro
 {ca_volume}    networks: [ruchoir]
@@ -701,6 +778,55 @@ fn calendar_service(instance: &Instance, secrets: &Secrets) -> String {
       postgres: {{ condition: service_healthy }}
       valkey: {{ condition: service_healthy }}
       propolis: {{ condition: service_started }}
+    restart: unless-stopped
+"#
+    )
+}
+
+/// The chat, reached through the proxy alone, with the drive it keeps the files of messages in. Its
+/// database password comes from `.env`. It sends no mail. It reads the first link of a message for
+/// its preview, never on its own domain, which covers every host of the instance.
+fn chat_service(instance: &Instance, secrets: &Secrets) -> String {
+    let chat = instance.url("chat");
+    let propolis = instance.url("propolis");
+    let hub = instance.url("hub");
+    let drive = instance.url("drive");
+    let kid = &secrets.key("chat", "auth").kid;
+    let events_kid = &secrets.key("chat", "events").kid;
+    let (trust, ca_volume) = (trust_of(instance), ca_volume_of(instance));
+    let image = if instance.dev {
+        "ruchoir/chat:dev"
+    } else {
+        "registry.ruchoir.com/chat:latest"
+    };
+    format!(
+        r#"
+  chat:
+    image: ${{CHAT_IMAGE:-{image}}}
+    user: ${{RUCHOIR_USER:-10001:10001}}
+    environment:
+      CHAT_PUBLIC_URL: {chat}
+      CHAT_DATABASE_URL: postgres://chat:${{CHAT_DB_PASSWORD}}@postgres:5432/chat
+      CHAT_VALKEY_URL: redis://valkey:6379/4
+      CHAT_TRUSTED_PROXIES: {SUBNET}
+      CHAT_ISSUER: {propolis}
+      CHAT_CLIENT_ID: chat
+      CHAT_CLIENT_KEY: /keys/chat-auth.pem
+      CHAT_CLIENT_KEY_ID: {kid}
+      CHAT_HUB_URL: {hub}
+      CHAT_EVENTS_KEY: /keys/chat-events.pem
+      CHAT_EVENTS_KEY_ID: {events_kid}
+      CHAT_DRIVE_URL: {drive}
+      CHAT_UNFURL_ENABLED: "true"
+{trust}    volumes:
+      - ./keys/chat-auth.pem:/keys/chat-auth.pem:ro
+      - ./keys/chat-events.pem:/keys/chat-events.pem:ro
+{ca_volume}    networks: [ruchoir]
+    depends_on:
+      postgres: {{ condition: service_healthy }}
+      valkey: {{ condition: service_healthy }}
+      propolis: {{ condition: service_started }}
+      drive: {{ condition: service_started }}
     restart: unless-stopped
 "#
     )

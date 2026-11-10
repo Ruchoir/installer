@@ -563,8 +563,8 @@ fn the_drive_talks_to_the_hub_and_hears_propolis() {
 
 #[test]
 fn an_unknown_product_is_refused() {
-    let error = production().with_products(&["chat"]).unwrap_err();
-    assert!(error.contains("\"chat\" is not a product"), "{error}");
+    let error = production().with_products(&["mail"]).unwrap_err();
+    assert!(error.contains("\"mail\" is not a product"), "{error}");
     let dir = tempfile::tempdir().unwrap();
     assert!(ruchoir_install::products_kept(dir.path(), &["drive", "chess"]).is_err());
     // Names are read without regard to case or spaces, and once.
@@ -611,9 +611,17 @@ struct CheckedClient {
     #[serde(default)]
     resource_scopes: Vec<String>,
     #[serde(default)]
-    token_exchange: Vec<toml::Value>,
+    token_exchange: Vec<CheckedExchange>,
     #[serde(default)]
     jwks: Vec<toml::Table>,
+}
+
+/// `TokenExchange` of `clients.rs`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckedExchange {
+    audience: String,
+    scopes: Vec<String>,
 }
 
 fn private_key_jwt() -> String {
@@ -724,6 +732,23 @@ fn check_registry(text: &str) -> Result<(), String> {
             return Err(format!(
                 "{id}: scope {scope:?} is neither Propolis's nor a resource's"
             ));
+        }
+        // A token is exchanged only for a resource of the instance, and for the scopes it declares.
+        for exchange in &client.token_exchange {
+            if !registry
+                .clients
+                .iter()
+                .any(|c| c.resource.as_deref() == Some(exchange.audience.as_str()))
+            {
+                return Err(format!("{id}: {:?} is no resource", exchange.audience));
+            }
+            if let Some(scope) = exchange
+                .scopes
+                .iter()
+                .find(|s| !declared.contains(s.as_str()))
+            {
+                return Err(format!("{id}: exchanged scope {scope:?} is no resource's"));
+            }
         }
         // A resource server declares its own scopes.
         if let Some(scope) = client
@@ -1287,4 +1312,396 @@ fn without_the_calendar_nothing_of_it_appears() {
     let dev = tempfile::tempdir().unwrap();
     init(dev.path(), &with_drive(Instance::development())).unwrap();
     assert!(!read(dev.path(), "dev-ca/names").contains("calendar"));
+}
+
+// ---- The chat, which brings the drive, alone or with the calendar ----
+
+fn with_chat(instance: Instance) -> Instance {
+    instance.with_products(&["chat"]).unwrap()
+}
+
+fn with_chat_and_calendar(instance: Instance) -> Instance {
+    instance.with_products(&["chat", "calendar"]).unwrap()
+}
+
+#[test]
+fn choosing_the_chat_installs_the_drive() {
+    assert_eq!(with_chat(production()).products, ["drive", "chat"]);
+    assert_eq!(
+        with_chat_and_calendar(production()).products,
+        ["drive", "calendar", "chat"]
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let products = ruchoir_install::products_kept(dir.path(), &["chat"]).unwrap();
+    assert_eq!(products, ["drive", "chat"]);
+    init(dir.path(), &production().with_products(&products).unwrap()).unwrap();
+    let env = env_of(dir.path());
+    for name in DRIVE_SECRETS {
+        assert!(env.contains_key(name), "{name} missing");
+    }
+    assert!(dir.path().join("garage/garage.toml").exists());
+    assert_eq!(
+        ruchoir_install::installed_products(dir.path()).unwrap(),
+        ["drive", "chat"]
+    );
+    let compose = read(dir.path(), "compose.yaml");
+    assert!(compose.contains("\n  drive:\n"));
+    assert!(compose.contains("\n  garage:\n"));
+
+    // Added to an instance with the calendar alone, the chat brings the drive with it.
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_calendar(production())).unwrap();
+    let before = env_of(dir.path());
+    let products = ruchoir_install::products_kept(dir.path(), &["chat"]).unwrap();
+    assert_eq!(products, ["drive", "calendar", "chat"]);
+    init(dir.path(), &production().with_products(&products).unwrap()).unwrap();
+    let after = env_of(dir.path());
+    for (name, value) in &before {
+        assert_eq!(&after[name], value, "{name} changed");
+    }
+}
+
+#[test]
+fn the_chat_gets_its_secrets_and_keys_and_keeps_them() {
+    for instance in [
+        with_chat(production()),
+        with_chat_and_calendar(production()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let env = env_of(dir.path());
+        assert!(hex(&env["CHAT_DB_PASSWORD"], 48));
+        // The chat keeps no encryption key of its own.
+        assert!(!env.contains_key("CHAT_SECRET_KEY"));
+        assert!(read(dir.path(), "keys/chat-auth.pem").starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(read(dir.path(), "keys/chat-auth.kid").starts_with("chat-auth-"));
+        assert!(read(dir.path(), "keys/chat-events.kid").starts_with("chat-events-"));
+
+        let kept = [
+            ".env",
+            "keys/chat-auth.pem",
+            "keys/chat-auth.kid",
+            "keys/chat-events.pem",
+            "keys/chat-events.kid",
+        ];
+        let before: Vec<String> = kept.iter().map(|p| read(dir.path(), p)).collect();
+        let products = ruchoir_install::products_kept(dir.path(), &[] as &[&str]).unwrap();
+        assert_eq!(products, instance.products);
+        init(dir.path(), &production().with_products(&products).unwrap()).unwrap();
+        let after: Vec<String> = kept.iter().map(|p| read(dir.path(), p)).collect();
+        assert_eq!(before, after);
+    }
+}
+
+#[test]
+fn the_compose_file_runs_the_chat_with_secrets_by_name() {
+    for instance in [
+        with_chat(production()),
+        with_chat_and_calendar(production()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let compose = read(dir.path(), "compose.yaml");
+        let kid = read(dir.path(), "keys/chat-auth.kid");
+        let events_kid = read(dir.path(), "keys/chat-events.kid");
+        let get = |name: &str| compose_env(&compose, "chat", name);
+        assert!(compose.contains(
+            "  chat:\n    image: ${CHAT_IMAGE:-registry.ruchoir.com/chat:latest}\n    user: ${RUCHOIR_USER:-10001:10001}\n"
+        ));
+        for (name, value) in [
+            ("CHAT_PUBLIC_URL", "https://chat.example.org"),
+            (
+                "CHAT_DATABASE_URL",
+                "postgres://chat:${CHAT_DB_PASSWORD}@postgres:5432/chat",
+            ),
+            ("CHAT_VALKEY_URL", "redis://valkey:6379/4"),
+            ("CHAT_TRUSTED_PROXIES", "10.89.0.0/24"),
+            ("CHAT_ISSUER", "https://id.example.org"),
+            ("CHAT_CLIENT_ID", "chat"),
+            ("CHAT_CLIENT_KEY", "/keys/chat-auth.pem"),
+            ("CHAT_CLIENT_KEY_ID", kid.as_str()),
+            ("CHAT_HUB_URL", "https://hub.example.org"),
+            ("CHAT_EVENTS_KEY", "/keys/chat-events.pem"),
+            ("CHAT_EVENTS_KEY_ID", events_kid.as_str()),
+            ("CHAT_DRIVE_URL", "https://drive.example.org"),
+            ("CHAT_UNFURL_ENABLED", "\"true\""),
+        ] {
+            assert_eq!(get(name).as_deref(), Some(value), "{name}");
+        }
+        // Its own domain is never read for a preview, which covers the instance: no list needed.
+        assert_eq!(get("CHAT_UNFURL_DENY_HOSTS"), None);
+        // The chat sends no mail and has no key of its own in `.env`.
+        assert!(!compose.contains("CHAT_SMTP_"));
+        assert!(!compose.contains("CHAT_SECRET_KEY"));
+        for line in [
+            "./keys/chat-auth.pem:/keys/chat-auth.pem:ro",
+            "./keys/chat-events.pem:/keys/chat-events.pem:ro",
+            "CHAT_DB_PASSWORD: ${CHAT_DB_PASSWORD}",
+            "- chat.example.org",
+            "      drive: { condition: service_started }\n",
+        ] {
+            assert!(compose.contains(line), "missing: {line}");
+        }
+        assert_eq!(compose.matches("redis://valkey:6379/4").count(), 1);
+        assert!(!compose.contains("SSL_CERT_FILE"));
+        assert_eq!(compose.matches("ports:").count(), 1);
+        for (name, value) in env_of(dir.path()) {
+            if name != "RUCHOIR_USER" {
+                assert!(!compose.contains(&value), "{name} is inline");
+            }
+        }
+        let pem = read(dir.path(), "keys/chat-auth.pem");
+        let body = pem.lines().nth(1).unwrap();
+        assert!(!compose.contains(body));
+        assert!(!read(dir.path(), "propolis/clients.toml").contains(body));
+
+        // With the calendar, its events are posted as cards in the chat's channels.
+        let chat_url = compose_env(&compose, "calendar", "CALENDAR_CHAT_URL");
+        if instance.has("calendar") {
+            assert_eq!(chat_url.as_deref(), Some("https://chat.example.org"));
+        } else {
+            assert_eq!(chat_url, None);
+        }
+
+        let script = read(dir.path(), "postgres/init.sh");
+        assert!(script.contains("CREATE ROLE chat LOGIN PASSWORD '$CHAT_DB_PASSWORD';"));
+        assert!(script.contains("CREATE DATABASE chat OWNER chat;"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&read(dir.path(), "manifest.json")).unwrap();
+        assert_eq!(
+            manifest["services"]["chat"]["url"],
+            "https://chat.example.org"
+        );
+        let routes = read(dir.path(), "traefik/dynamic.yml");
+        assert!(routes.contains(
+            "    chat:\n      rule: Host(`chat.example.org`)\n      entryPoints: [websecure]\n      service: chat\n      tls:\n        certResolver: actalis\n"
+        ));
+        assert!(routes.contains("- url: http://chat:8080"));
+    }
+}
+
+#[test]
+fn a_development_chat_is_built_here_and_trusts_the_local_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_chat(Instance::development())).unwrap();
+    let compose = read(dir.path(), "compose.yaml");
+    let get = |name: &str| compose_env(&compose, "chat", name);
+    assert!(compose.contains("image: ${CHAT_IMAGE:-ruchoir/chat:dev}"));
+    assert_eq!(
+        get("CHAT_PUBLIC_URL").as_deref(),
+        Some("https://chat.localhost")
+    );
+    assert_eq!(get("SSL_CERT_FILE").as_deref(), Some("/dev-ca/ca.pem"));
+    assert_eq!(get("CHAT_SMTP_HOST"), None);
+    let service = &compose[compose.find("\n  chat:\n").unwrap()..];
+    assert!(service.contains("- ./dev-ca:/dev-ca:ro"));
+    assert!(compose.contains("- chat.localhost"));
+    assert!(read(dir.path(), "traefik/dynamic.yml").contains("Host(`chat.localhost`)"));
+    let names = read(dir.path(), "dev-ca/names");
+    assert!(names.contains("chat.localhost\n"));
+    assert!(names.contains("drive.localhost\n"));
+}
+
+#[test]
+fn the_registry_with_the_chat_passes_propolis_checks() {
+    for instance in [
+        with_chat(production()),
+        with_chat_and_calendar(production()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let text = read(dir.path(), "propolis/clients.toml");
+        check_registry(&text).unwrap();
+
+        let registry: toml::Table = text.parse().unwrap();
+        let clients = registry["client"].as_array().unwrap();
+        let by_id = |id: &str| {
+            clients
+                .iter()
+                .map(|c| c.as_table().unwrap())
+                .find(|c| c["client_id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("no client {id}"))
+        };
+        let strings = |client: &toml::Table, name: &str| -> Vec<String> {
+            client
+                .get(name)
+                .and_then(toml::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|v| v.as_str().unwrap().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let chat = by_id("chat");
+        assert_eq!(chat["first_party"].as_bool(), Some(true));
+        assert_eq!(chat["resource"].as_str(), Some("https://chat.example.org"));
+        assert_eq!(
+            strings(chat, "grant_types"),
+            [
+                "authorization_code",
+                "refresh_token",
+                "client_credentials",
+                "urn:ietf:params:oauth:grant-type:token-exchange"
+            ]
+        );
+        assert_eq!(
+            strings(chat, "redirect_uris"),
+            ["https://chat.example.org/auth/callback"]
+        );
+        assert_eq!(
+            strings(chat, "post_logout_redirect_uris"),
+            ["https://chat.example.org/"]
+        );
+        assert_eq!(
+            chat["backchannel_logout_uri"].as_str(),
+            Some("https://chat.example.org/auth/backchannel-logout")
+        );
+        assert_eq!(
+            strings(chat, "scopes"),
+            [
+                "openid",
+                "profile",
+                "email",
+                "organizations",
+                "propolis:organizations.read",
+                "hub:publish",
+                "drive:held.manage"
+            ]
+        );
+        assert_eq!(
+            strings(chat, "resource_scopes"),
+            ["chat:cards.post", "chat:channels.read"]
+        );
+        // The pages' socket tickets: the person's token exchanged for one for the hub.
+        let exchange = chat["token_exchange"].as_array().unwrap();
+        assert_eq!(exchange.len(), 1);
+        assert_eq!(
+            exchange[0]["audience"].as_str(),
+            Some("https://hub.example.org")
+        );
+        assert!(exchange[0]["scopes"].as_array().unwrap().is_empty());
+        let kids: Vec<&str> = chat["jwks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k["kid"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kids,
+            [
+                read(dir.path(), "keys/chat-auth.kid").trim(),
+                read(dir.path(), "keys/chat-events.kid").trim()
+            ]
+        );
+        // The other products' pages need no exchange: only the chat's ask the hub for tickets.
+        for id in ["hub", "drive", "calendar"] {
+            if id != "calendar" || instance.has("calendar") {
+                assert!(!by_id(id).contains_key("token_exchange"), "{id}");
+            }
+        }
+        if instance.has("calendar") {
+            let scopes = strings(by_id("calendar"), "scopes");
+            assert!(scopes.ends_with(&[
+                "drive:held.manage".to_owned(),
+                "chat:cards.post".to_owned(),
+                "chat:channels.read".to_owned()
+            ]));
+        }
+    }
+
+    // Without the chat, no resource declares the chat's scopes, and the hub is no audience.
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_chat(production())).unwrap();
+    let text = read(dir.path(), "propolis/clients.toml");
+    for broken in [
+        text.replace(
+            "audience = \"https://hub.example.org\"",
+            "audience = \"https://hub.example.com\"",
+        ),
+        text.replace("scopes = []", "scopes = [\"chat:history.read\"]"),
+        text.replace("\"chat:cards.post\"", "\"calendar:cards.post\""),
+    ] {
+        assert!(check_registry(&broken).is_err(), "accepted:\n{broken}");
+    }
+}
+
+#[test]
+fn the_hub_delivers_to_the_chat_and_lets_its_pages_in() {
+    for instance in [
+        with_chat(production()),
+        with_chat_and_calendar(production()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let compose = read(dir.path(), "compose.yaml");
+        let origins = compose_env(&compose, "hub", "HUB_PAGE_ORIGINS").unwrap();
+        let origins: Vec<&str> = origins.split(',').collect();
+        let subscriptions =
+            check_subscriptions(&read(dir.path(), "hub/subscriptions.toml"), &origins).unwrap();
+        let chat = subscriptions
+            .subscriptions
+            .iter()
+            .find(|s| s.service == "chat")
+            .unwrap();
+        assert_eq!(chat.endpoint, "https://chat.example.org/api/v1/events");
+        assert_eq!(chat.kinds, ["propolis.*", "drive.file.*"]);
+        let drive_origins = compose_env(&compose, "drive", "DRIVE_PRODUCT_ORIGINS").unwrap();
+        if instance.has("calendar") {
+            assert_eq!(
+                origins,
+                [
+                    "https://drive.example.org",
+                    "https://calendar.example.org",
+                    "https://chat.example.org"
+                ]
+            );
+            assert_eq!(
+                drive_origins,
+                "https://calendar.example.org,https://chat.example.org"
+            );
+        } else {
+            assert_eq!(
+                origins,
+                ["https://drive.example.org", "https://chat.example.org"]
+            );
+            assert_eq!(drive_origins, "https://chat.example.org");
+        }
+    }
+}
+
+#[test]
+fn without_the_chat_nothing_of_it_appears() {
+    for instance in [
+        production(),
+        with_drive(production()),
+        with_calendar(production()),
+        with_drive_and_calendar(production()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        for path in [
+            "compose.yaml",
+            "traefik/dynamic.yml",
+            "postgres/init.sh",
+            "propolis/clients.toml",
+            "hub/subscriptions.toml",
+            "manifest.json",
+            ".env",
+        ] {
+            let text = read(dir.path(), path).to_lowercase();
+            assert!(!text.contains("chat"), "{path} names the chat");
+            assert!(!text.contains("token_exchange"), "{path} exchanges");
+        }
+        assert!(!dir.path().join("keys/chat-auth.pem").exists());
+        assert!(!dir.path().join("keys/chat-events.pem").exists());
+    }
+    let dev = tempfile::tempdir().unwrap();
+    init(
+        dev.path(),
+        &with_drive_and_calendar(Instance::development()),
+    )
+    .unwrap();
+    assert!(!read(dev.path(), "dev-ca/names").contains("chat"));
 }

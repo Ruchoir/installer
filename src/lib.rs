@@ -5,7 +5,7 @@
 //!   Propolis and the hub are always there; the products are chosen ([`PRODUCTS`]).
 //! - [`secrets`]: what is generated once and kept (database passwords, Propolis's encryption key,
 //!   each service's Ed25519 keys, Garage's secrets and the drive's S3 key, the calendar's
-//!   encryption key). Running `init` again keeps them.
+//!   encryption key, the chat's database password). Running `init` again keeps them.
 //! - [`render`]: the files the services and the proxy read, from the instance and its secrets.
 //! - [`garage`]: the object store the drive keeps its files in: its configuration, and the commands
 //!   that prepare a fresh one.
@@ -31,15 +31,19 @@ use std::path::Path;
 pub const ALWAYS: [&str; 2] = ["propolis", "hub"];
 
 /// The products that can be installed besides Propolis and the hub, each on its own or with the
-/// others. The calendar works alone; with the drive, its events carry files the drive keeps.
-// When the chat comes, choosing it installs the drive too: its attachments are files of the drive.
-pub const PRODUCTS: [&str; 2] = ["drive", "calendar"];
+/// others. The calendar works alone; with the drive, its events carry files the drive keeps. The
+/// chat needs the drive ([`REQUIRES`]); with the calendar, events are posted as cards in channels.
+pub const PRODUCTS: [&str; 3] = ["drive", "calendar", "chat"];
+
+/// The products another one cannot go without, installed with it: the chat's attachments are files
+/// of the drive, so choosing the chat installs the drive too.
+pub const REQUIRES: [(&str, &str); 1] = [("chat", "drive")];
 
 /// An instance to set up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
     /// The domain its services live under: `id.<domain>` for Propolis (ADR 0012), `hub.<domain>`,
-    /// `drive.<domain>`, `calendar.<domain>`.
+    /// `drive.<domain>`, `calendar.<domain>`, `chat.<domain>`.
     pub domain: String,
     /// Development: `localhost`, a local certificate, a mail catcher, images built from source.
     pub dev: bool,
@@ -123,7 +127,8 @@ impl Instance {
     }
 }
 
-/// `products` checked and put in the order of [`PRODUCTS`], each once.
+/// `products` checked and put in the order of [`PRODUCTS`], each once, with those they require
+/// ([`REQUIRES`]).
 fn checked_products<S: AsRef<str>>(products: &[S]) -> Result<Vec<String>, String> {
     let mut asked = Vec::new();
     for product in products {
@@ -136,6 +141,12 @@ fn checked_products<S: AsRef<str>>(products: &[S]) -> Result<Vec<String>, String
                 "{name:?} is not a product: the products are {}",
                 PRODUCTS.join(", ")
             ));
+        }
+        // Choosing the chat installs the drive: its messages carry files the drive keeps.
+        for (product, required) in REQUIRES {
+            if name == product {
+                asked.push(required.to_owned());
+            }
         }
         asked.push(name);
     }
