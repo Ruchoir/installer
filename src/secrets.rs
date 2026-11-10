@@ -12,6 +12,7 @@
 //! - With the calendar, in `.env`: its database password and its encryption key
 //!   (`CALENDAR_SECRET_KEY`, 64 hexadecimal characters), which keeps the tokens of people invited by
 //!   address: replacing it would void the links already mailed.
+//! - With the chat, in `.env`: its database password. The chat keeps no encryption key of its own.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -40,6 +41,9 @@ pub const DRIVE_VARIABLES: [&str; 5] = [
 
 /// The variables of `.env` the calendar adds, in the order they are written.
 pub const CALENDAR_VARIABLES: [&str; 2] = ["CALENDAR_DB_PASSWORD", "CALENDAR_SECRET_KEY"];
+
+/// The variables of `.env` the chat adds.
+pub const CHAT_VARIABLES: [&str; 1] = ["CHAT_DB_PASSWORD"];
 
 /// A new value for the variable `name` of `.env`.
 fn make(name: &str) -> Result<String, String> {
@@ -179,7 +183,12 @@ impl Secrets {
         } else {
             &[]
         };
-        for name in VARIABLES.iter().chain(drive).chain(calendar) {
+        let chat: &[&str] = if instance.has("chat") {
+            &CHAT_VARIABLES
+        } else {
+            &[]
+        };
+        for name in VARIABLES.iter().chain(drive).chain(calendar).chain(chat) {
             if env.get(*name).is_none_or(|v| v.is_empty()) {
                 env.insert((*name).to_owned(), make(name)?);
                 changed = true;
@@ -197,11 +206,13 @@ impl Secrets {
                 VARIABLES.contains(&k)
                     || DRIVE_VARIABLES.contains(&k)
                     || CALENDAR_VARIABLES.contains(&k)
+                    || CHAT_VARIABLES.contains(&k)
             };
             let text: String = VARIABLES
                 .iter()
                 .chain(&DRIVE_VARIABLES)
                 .chain(&CALENDAR_VARIABLES)
+                .chain(&CHAT_VARIABLES)
                 .copied()
                 .filter(|k| env.contains_key(*k))
                 .chain(env.keys().map(String::as_str).filter(|k| !known(k)))

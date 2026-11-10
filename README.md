@@ -5,7 +5,8 @@ proxy are always installed, plus the products chosen (choosing the chat also ins
 keeps the manifest of installed products, published at a `.well-known` address.
 
 > In construction: part of the restructuring of Ruchoir into separate products. Version 0 installs
-> Propolis and the hub, and the drive and the calendar when asked; the other products follow.
+> Propolis and the hub, and the drive, the calendar and the chat when asked; the other products
+> follow.
 
 ## Use
 
@@ -41,11 +42,16 @@ relay in production, so until you give it yours in `compose.override.yaml` (`CAL
 `CALENDAR_SMTP_PORT`, `CALENDAR_SMTP_USERNAME`, `CALENDAR_SMTP_PASSWORD`, `CALENDAR_SMTP_FROM`, as
 for Propolis), those mails are only logged.
 
+The chat comes with `--products chat`, and always brings the drive, where messages keep their files:
+it answers at `chat.example.org`. Beside the calendar (`--products chat,calendar`), events are posted
+as cards in channels. The chat sends no mail; it reads the first link of a message for its preview,
+never on the instance's own domain.
+
 For development, with the `propolis` and `hub` repositories (and those of the products asked,
-`drive`, `calendar`) checked out side by side:
+`drive`, `calendar`, `chat`) checked out side by side:
 
 ```sh
-NODE_AUTH_TOKEN=... ruchoir-install dev --source .. --products drive,calendar
+NODE_AUTH_TOKEN=... ruchoir-install dev --source .. --products calendar,chat
 ```
 
 builds their images, starts the instance at `https://id.localhost`, and catches every mail at
