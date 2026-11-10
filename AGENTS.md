@@ -108,7 +108,7 @@ what is specific to this repository, and never contradicts this block.
 
 The installer sets up a self-hosted Ruchoir instance à la carte. Propolis, the hub and the reverse
 proxy are always installed, plus the products chosen (choosing the chat also installs the drive). It
-keeps the manifest of installed products, published at a `.well-known` address.
+keeps the manifest of installed products, which the hub publishes at a `.well-known` address.
 
 **Status:** v0. `ruchoir-install` writes an instance's directory and runs it with Docker Compose:
 Propolis, the hub and the proxy, in production (`init`, `up`, `down`) or on `*.localhost` (`dev`).
@@ -135,6 +135,11 @@ calendar, on its own or beside the drive, and the chat, which always brings the 
 - `src/render.rs`: every other file, written anew each time from the instance and its secrets:
   `manifest.json`, `compose.yaml`, `traefik/`, `propolis/clients.toml`, `hub/subscriptions.toml`,
   `postgres/init.sh`, and with the drive `garage/garage.toml` and `office/`.
+- Discovery: apps and pages start at `https://hub.<domain>/.well-known/ruchoir-manifest`. The hub
+  serves `manifest.json` (`version`, `domain`, and `services`, each installed service with its `url`),
+  mounted read-only at `/manifest/manifest.json` with `HUB_MANIFEST` pointing at it. Each service then
+  answers `/.well-known/ruchoir-product`. The file is mounted, not copied, so a later `init` that adds
+  a product is served without restarting the hub.
 - What a product is given by the others is written where both are known: with the drive and the
   calendar, the calendar's client asks `drive:held.manage` (the drive declares it), the calendar
   gets `CALENDAR_DRIVE_URL` and hears `drive.file.*` at the hub, and the drive gets the calendar's

@@ -1705,3 +1705,48 @@ fn without_the_chat_nothing_of_it_appears() {
     .unwrap();
     assert!(!read(dev.path(), "dev-ca/names").contains("chat"));
 }
+
+#[test]
+fn the_hub_serves_the_manifest_listing_every_service_with_its_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let instance = production().with_products(&["chat", "calendar"]).unwrap();
+    init(dir.path(), &instance).unwrap();
+
+    // The manifest lists every installed service, each with its public address.
+    let manifest: serde_json::Value =
+        serde_json::from_str(&read(dir.path(), "manifest.json")).unwrap();
+    let services = manifest["services"].as_object().unwrap();
+    let listed: BTreeSet<&str> = services.keys().map(String::as_str).collect();
+    let installed: BTreeSet<&str> = instance.services().into_iter().collect();
+    assert_eq!(listed, installed);
+    for (name, service) in services {
+        assert_eq!(service["url"], instance.url(name), "{name}");
+        assert!(service["url"].as_str().unwrap().starts_with("https://"));
+    }
+    assert_eq!(
+        services.keys().cloned().collect::<BTreeSet<_>>(),
+        ["calendar", "chat", "drive", "hub", "propolis"]
+            .map(str::to_owned)
+            .into(),
+    );
+
+    // The hub reads it, mounted read-only, and serves it to the apps and pages.
+    let compose = read(dir.path(), "compose.yaml");
+    assert_eq!(
+        compose_env(&compose, "hub", "HUB_MANIFEST").as_deref(),
+        Some("/manifest/manifest.json")
+    );
+    assert!(compose.contains("      - ./manifest.json:/manifest/manifest.json:ro\n"));
+}
+
+#[test]
+fn a_development_hub_serves_the_manifest_too() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &Instance::development()).unwrap();
+    let compose = read(dir.path(), "compose.yaml");
+    assert_eq!(
+        compose_env(&compose, "hub", "HUB_MANIFEST").as_deref(),
+        Some("/manifest/manifest.json")
+    );
+    assert!(compose.contains("./manifest.json:/manifest/manifest.json:ro"));
+}
