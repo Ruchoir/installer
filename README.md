@@ -2,11 +2,18 @@
 
 The installer sets up a self-hosted Ruchoir instance à la carte. Propolis, the hub and the reverse
 proxy are always installed, plus the products chosen (choosing the chat also installs the drive). It
-keeps the manifest of installed products, published at a `.well-known` address.
+keeps the manifest of installed products, which the hub publishes at a `.well-known` address.
 
 > In construction: part of the restructuring of Ruchoir into separate products. Version 0 installs
 > Propolis and the hub, and the drive, the calendar and the chat when asked; the other products
 > follow.
+
+## Discovery
+
+An app or a page starts from `https://hub.<domain>/.well-known/ruchoir-manifest`: the hub serves the
+`manifest.json` that `init` writes (mounted read-only into its container, `HUB_MANIFEST`), which
+lists every installed service with its address. Each service then describes itself at
+`/.well-known/ruchoir-product`.
 
 ## Use
 

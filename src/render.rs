@@ -602,8 +602,10 @@ services:
       HUB_SUBSCRIPTIONS: /config/subscriptions.toml
       HUB_PAGE_ORIGINS: {page_origins}
       HUB_VAPID_KEY: /keys/hub-vapid.pem
+      HUB_MANIFEST: /manifest/manifest.json
 {trust}    volumes:
       - ./hub:/config:ro
+      - ./manifest.json:/manifest/manifest.json:ro
       - ./keys/hub-auth.pem:/keys/hub-auth.pem:ro
       - ./keys/hub-vapid.pem:/keys/hub-vapid.pem:ro
 {ca_volume}    networks: [ruchoir]
