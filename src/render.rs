@@ -1,8 +1,9 @@
 //! The files of an instance, written from it and its secrets (plan of the installer v0).
 //!
-//! - `manifest.json`: the services installed and their addresses (ADR 0004), versioned.
+//! - `manifest.json`: the services installed and their addresses (ADR 0004), versioned. Lab is never
+//!   listed: it is the team's tool, not a product of the instance.
 //! - `propolis/clients.toml`: the clients of the instance, with their public keys (Propolis's design,
-//!   section 9.2): the hub, and each product installed. The chat may exchange a person's token for
+//!   section 9.2): the hub, each product installed, and Lab when it runs. The chat may exchange a person's token for
 //!   one for the hub, which its pages' socket tickets are asked with.
 //! - `hub/subscriptions.toml`: which service receives which events, for the products installed.
 //! - `postgres/init.sh`: one database and one role per service.
@@ -45,7 +46,7 @@ fn write_bytes(dir: &Path, path: &str, bytes: &[u8]) -> Result<(), String> {
 /// The manifest.
 pub fn manifest(instance: &Instance) -> String {
     let services: serde_json::Map<String, serde_json::Value> = instance
-        .services()
+        .listed()
         .into_iter()
         .map(|s| (s.to_owned(), json!({ "url": instance.url(s) })))
         .collect();
@@ -281,6 +282,32 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             jwks: jwks("chat"),
         });
     }
+    if instance.lab {
+        let lab = instance.url(crate::LAB);
+        client.push(RegistryClient {
+            client_id: "ruchoir-lab".to_owned(),
+            name: "Ruchoir Lab".to_owned(),
+            first_party: true,
+            token_endpoint_auth_method: None,
+            resource: Some(lab.clone()),
+            // The team signs in to Lab (its own session, `/auth/*`), as to a product.
+            redirect_uris: vec![format!("{lab}/auth/callback")],
+            post_logout_redirect_uris: vec![format!("{lab}/")],
+            // Its session, and the structure of the organisation it lets in, read in its own name.
+            grant_types: strings(&["authorization_code", "refresh_token", "client_credentials"]),
+            scopes: strings(&[
+                "openid",
+                "profile",
+                "email",
+                "organizations",
+                "propolis:organizations.read",
+            ]),
+            resource_scopes: Vec::new(),
+            backchannel_logout_uri: Some(format!("{lab}/auth/backchannel-logout")),
+            token_exchange: Vec::new(),
+            jwks: jwks(crate::LAB),
+        });
+    }
     client.push(app(
         "ruchoir-desktop",
         "Ruchoir (desktop)",
@@ -514,6 +541,12 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
     } else {
         String::new()
     };
+    let lab = if instance.lab {
+        products_db.push_str("      LAB_DB_PASSWORD: ${LAB_DB_PASSWORD}\n");
+        lab_service(instance, secrets)
+    } else {
+        String::new()
+    };
     let office_network = if instance.has("drive") {
         "  # The office engine's network: the engine and the drive, no route out.\n  office:\n    internal: true\n"
     } else {
@@ -661,7 +694,7 @@ services:
       valkey: {{ condition: service_healthy }}
       propolis: {{ condition: service_started }}
     restart: unless-stopped
-{drive}{calendar}{chat}"#
+{drive}{calendar}{chat}{lab}"#
     )
 }
 
@@ -876,6 +909,41 @@ fn chat_service(instance: &Instance, secrets: &Secrets) -> String {
       valkey: {{ condition: service_healthy }}
       propolis: {{ condition: service_started }}
       drive: {{ condition: service_started }}
+    restart: unless-stopped
+"#
+    )
+}
+
+/// Lab, the team's tool, reached through the proxy alone, on a development instance. Its database
+/// password comes from `.env`. `LAB_ORGANISATION`, the organisation whose members get in, is set by
+/// hand once it exists in Propolis (`compose.override.yaml`, or the shell): until then nobody gets in.
+fn lab_service(instance: &Instance, secrets: &Secrets) -> String {
+    let lab = instance.url(crate::LAB);
+    let propolis = instance.url("propolis");
+    let kid = &secrets.key(crate::LAB, "auth").kid;
+    let (trust, ca_volume) = (trust_of(instance), ca_volume_of(instance));
+    format!(
+        r#"
+  lab:
+    image: ${{LAB_IMAGE:-ruchoir/lab:dev}}
+    user: ${{RUCHOIR_USER:-10001:10001}}
+    environment:
+      LAB_PUBLIC_URL: {lab}
+      LAB_DATABASE_URL: postgres://lab:${{LAB_DB_PASSWORD}}@postgres:5432/lab
+      LAB_VALKEY_URL: redis://valkey:6379/5
+      LAB_TRUSTED_PROXIES: {SUBNET}
+      LAB_ISSUER: {propolis}
+      LAB_CLIENT_ID: ruchoir-lab
+      LAB_CLIENT_KEY: /keys/lab-auth.pem
+      LAB_CLIENT_KEY_ID: {kid}
+      LAB_ORGANISATION: ${{LAB_ORGANISATION:-}}
+{trust}    volumes:
+      - ./keys/lab-auth.pem:/keys/lab-auth.pem:ro
+{ca_volume}    networks: [ruchoir]
+    depends_on:
+      postgres: {{ condition: service_healthy }}
+      valkey: {{ condition: service_healthy }}
+      propolis: {{ condition: service_started }}
     restart: unless-stopped
 "#
     )

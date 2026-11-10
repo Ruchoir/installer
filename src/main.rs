@@ -5,7 +5,9 @@ use std::process::{Command, ExitCode, Output};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use ruchoir_install::{garage, init, installed_products, products_kept, secrets, Instance};
+use ruchoir_install::{
+    garage, init, installed_products, lab_kept, products_kept, secrets, Instance,
+};
 
 #[derive(Parser)]
 #[command(name = "ruchoir-install", version, about)]
@@ -62,6 +64,10 @@ enum Commands {
         /// Write the directory and build the images, without starting anything.
         #[arg(long)]
         no_start: bool,
+        /// Run Lab, the team's internal tool, at `https://lab.localhost` (never in the manifest).
+        /// Kept once installed.
+        #[arg(long)]
+        lab: bool,
     },
 }
 
@@ -110,9 +116,11 @@ fn run(command: Commands) -> Result<(), String> {
             products,
             source,
             no_start,
+            lab,
         } => {
-            let instance =
-                Instance::development().with_products(&products_kept(&dir, &products)?)?;
+            let instance = Instance::development()
+                .with_products(&products_kept(&dir, &products)?)?
+                .with_lab(lab || lab_kept(&dir))?;
             init(&dir, &instance)?;
             if let Some(source) = source {
                 for service in instance.services() {
@@ -231,7 +239,7 @@ fn build(source: &Path, service: &str) -> Result<(), String> {
         .arg("build")
         .arg("--tag")
         .arg(format!("ruchoir/{service}:dev"));
-    if matches!(service, "propolis" | "drive" | "calendar" | "chat") {
+    if matches!(service, "propolis" | "drive" | "calendar" | "chat" | "lab") {
         command
             .arg("--secret")
             .arg("id=npm_token,env=NODE_AUTH_TOKEN");

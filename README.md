@@ -64,6 +64,11 @@ NODE_AUTH_TOKEN=... ruchoir-install dev --source .. --products calendar,chat
 builds their images, starts the instance at `https://id.localhost`, and catches every mail at
 `http://localhost:8025`. Trust `ruchoir-dev/dev-ca/ca.pem` in your browser.
 
+`--lab` adds Lab, the team's internal tool, at `https://lab.localhost` (with the `lab` repository
+checked out beside the others). It is never in the manifest and never installed in production. Lab
+lets in the members of one organisation: once it exists in Propolis, set its id as
+`LAB_ORGANISATION` (in `compose.override.yaml` or the shell) and restart Lab.
+
 - How to work here: [`AGENTS.md`](AGENTS.md), which opens with the common rules of the organization.
 - How to contribute: [Ruchoir/.github, `CONTRIBUTING.md`](https://github.com/Ruchoir/.github/blob/main/CONTRIBUTING.md).
 - Decisions that span several repositories: [Ruchoir/.github, `docs/adr`](https://github.com/Ruchoir/.github/tree/main/docs/adr).

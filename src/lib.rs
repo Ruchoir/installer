@@ -13,6 +13,8 @@
 //!   files, and the drive's settings for it.
 //! - [`dev_ca`]: in development, a local certificate authority and a certificate for `*.localhost`,
 //!   which the proxy serves and the services trust.
+//! - Lab, the team's internal tool ([`LAB`]): in development only, never in the manifest, kept once
+//!   installed (its client key is there, [`lab_kept`]).
 //!
 //! The products installed are those of the manifest written last: `init --products drive` adds the
 //! drive, and a later `init` without `--products` keeps what the manifest lists
@@ -39,6 +41,10 @@ pub const PRODUCTS: [&str; 3] = ["drive", "calendar", "chat"];
 /// of the drive, so choosing the chat installs the drive too.
 pub const REQUIRES: [(&str, &str); 1] = [("chat", "drive")];
 
+/// Lab, the team's internal tool: a service of a development instance when asked (`dev --lab`), never
+/// a product of the manifest nor offered to customers (plan of phase 7, decision 9).
+pub const LAB: &str = "lab";
+
 /// An instance to set up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
@@ -51,6 +57,8 @@ pub struct Instance {
     pub acme_email: Option<String>,
     /// The products installed, in the order of [`PRODUCTS`].
     pub products: Vec<String>,
+    /// Whether Lab runs beside them (development only).
+    pub lab: bool,
 }
 
 impl Instance {
@@ -74,6 +82,7 @@ impl Instance {
             dev: false,
             acme_email,
             products: Vec::new(),
+            lab: false,
         })
     }
 
@@ -84,7 +93,18 @@ impl Instance {
             dev: true,
             acme_email: None,
             products: Vec::new(),
+            lab: false,
         }
+    }
+
+    /// The same instance with Lab beside the products, or without it. Only a development instance
+    /// runs Lab.
+    pub fn with_lab(mut self, lab: bool) -> Result<Self, String> {
+        if lab && !self.dev {
+            return Err("Lab runs on a development instance only".to_owned());
+        }
+        self.lab = lab;
+        Ok(self)
     }
 
     /// The same instance with `products` installed. A name that is not a product is refused.
@@ -98,8 +118,17 @@ impl Instance {
         self.products.iter().any(|p| p == product)
     }
 
-    /// Every service of the instance: Propolis, the hub, then the products.
+    /// Every service of the instance: Propolis, the hub, the products, then Lab when it runs.
     pub fn services(&self) -> Vec<&str> {
+        let mut services = self.listed();
+        if self.lab {
+            services.push(LAB);
+        }
+        services
+    }
+
+    /// The services the manifest lists: Propolis, the hub, then the products. Never Lab.
+    pub fn listed(&self) -> Vec<&str> {
         ALWAYS
             .iter()
             .copied()
@@ -186,6 +215,11 @@ pub fn products_kept<S: AsRef<str>>(dir: &Path, asked: &[S]) -> Result<Vec<Strin
     let mut products = installed_products(dir)?;
     products.extend(checked_products(asked)?);
     checked_products(&products)
+}
+
+/// Whether Lab was installed in `dir`: its client key is there.
+pub fn lab_kept(dir: &Path) -> bool {
+    dir.join("keys").join("lab-auth.pem").exists()
 }
 
 /// Write the instance's directory: secrets kept, every other file written again.

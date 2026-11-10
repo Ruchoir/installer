@@ -117,6 +117,13 @@ Euro-Office, its office engine, which always comes with it (phase 3 plan, decisi
 calendar, on its own or beside the drive, and the chat, which always brings the drive
 (`REQUIRES` in `src/lib.rs`, applied where the products asked are checked).
 
+Lab, the team's internal tool, runs beside them on a development instance only (`dev --lab`,
+`Instance::with_lab`): its service, database and secret, its route at `lab.<domain>`, and the
+confidential client `ruchoir-lab` in Propolis's registry (`propolis:organizations.read` to read the
+organisation it lets in). It is in `Instance::services()` but never in the manifest
+(`Instance::listed()`), so it is kept across runs by its client key (`lab_kept`), not by the
+manifest. `LAB_ORGANISATION` is left to the operator (`${LAB_ORGANISATION:-}`).
+
 ### How it is built
 
 - `src/lib.rs`: the instance (domain, mode, products) and `init`, which writes the directory. The
