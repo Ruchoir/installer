@@ -20,14 +20,14 @@ enum Commands {
     /// other file anew.
     Init {
         /// The domain the services live under: Propolis at `id.<domain>`, the hub at `hub.<domain>`,
-        /// the drive at `drive.<domain>`.
+        /// the drive at `drive.<domain>`, the calendar at `calendar.<domain>`.
         #[arg(long)]
         domain: String,
         /// The address the certificate authority (Actalis) writes to about the certificates.
         #[arg(long)]
         acme_email: Option<String>,
-        /// The products to install besides Propolis and the hub: `drive`. Those installed before are
-        /// kept.
+        /// The products to install besides Propolis and the hub: `drive`, `calendar`. Those
+        /// installed before are kept.
         #[arg(long, value_delimiter = ',')]
         products: Vec<String>,
         /// The instance's directory.
@@ -49,8 +49,8 @@ enum Commands {
     Dev {
         #[arg(long, default_value = "ruchoir-dev")]
         dir: PathBuf,
-        /// The products to install besides Propolis and the hub: `drive`. Those installed before are
-        /// kept.
+        /// The products to install besides Propolis and the hub: `drive`, `calendar`. Those
+        /// installed before are kept.
         #[arg(long, value_delimiter = ',')]
         products: Vec<String>,
         /// A directory holding the repositories of the services (`propolis`, `hub`, and those of the
@@ -220,8 +220,9 @@ fn bootstrap_garage(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Build a service's development image from its repository. Propolis's pages need the organization's
-/// npm packages: the token is read from `NODE_AUTH_TOKEN`, as a build secret, never a layer.
+/// Build a service's development image from its repository. Propolis's and the calendar's pages need
+/// the organization's npm packages: the token is read from `NODE_AUTH_TOKEN`, as the build secret
+/// `npm_token` their Dockerfiles name, never a layer.
 fn build(source: &Path, service: &str) -> Result<(), String> {
     let repository = source.join(service);
     let mut command = Command::new("docker");
@@ -229,7 +230,7 @@ fn build(source: &Path, service: &str) -> Result<(), String> {
         .arg("build")
         .arg("--tag")
         .arg(format!("ruchoir/{service}:dev"));
-    if service == "propolis" {
+    if matches!(service, "propolis" | "drive" | "calendar") {
         command
             .arg("--secret")
             .arg("id=npm_token,env=NODE_AUTH_TOKEN");

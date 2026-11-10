@@ -113,7 +113,8 @@ keeps the manifest of installed products, published at a `.well-known` address.
 **Status:** v0. `ruchoir-install` writes an instance's directory and runs it with Docker Compose:
 Propolis, the hub and the proxy, in production (`init`, `up`, `down`) or on `*.localhost` (`dev`).
 The products are added with their phases (`--products`): the drive, with Garage for its files and
-Euro-Office, its office engine, which always comes with it (phase 3 plan, decision 4).
+Euro-Office, its office engine, which always comes with it (phase 3 plan, decision 4), and the
+calendar, on its own or beside the drive.
 
 ### How it is built
 
@@ -124,10 +125,18 @@ Euro-Office, its office engine, which always comes with it (phase 3 plan, decisi
   A product's secrets and keys are made when it is installed: for the drive, `keys/drive-auth.pem`
   and `keys/drive-events.pem`, its database password, Garage's RPC secret and admin token, and its
   S3 key (`DRIVE_S3_ACCESS_KEY_ID`, `GK` and 24 hexadecimal characters as Garage makes them).
+  For the calendar, `keys/calendar-auth.pem` and `keys/calendar-events.pem`, its database password
+  and `CALENDAR_SECRET_KEY` (64 hexadecimal characters, which encrypts the tokens of people invited
+  by address: replacing it voids the links already mailed).
   Running `init` again never replaces a secret or a key: the services and their data depend on them.
 - `src/render.rs`: every other file, written anew each time from the instance and its secrets:
   `manifest.json`, `compose.yaml`, `traefik/`, `propolis/clients.toml`, `hub/subscriptions.toml`,
   `postgres/init.sh`, and with the drive `garage/garage.toml` and `office/`.
+- What a product is given by the others is written where both are known: with the drive and the
+  calendar, the calendar's client asks `drive:held.manage` (the drive declares it), the calendar
+  gets `CALENDAR_DRIVE_URL` and hears `drive.file.*` at the hub, and the drive gets the calendar's
+  origin in `DRIVE_PRODUCT_ORIGINS` (`render::drive_product_origins`, every product but the drive).
+  `HUB_PAGE_ORIGINS` lists every product's origin (`render::page_origins`).
 - `src/garage.rs`: Garage, the drive's object store: its configuration, and the commands that
   prepare a fresh one (pure functions, unit-tested).
 - `src/office.rs`: Euro-Office, the drive's office engine: its service, the drive's settings for it
@@ -166,6 +175,16 @@ Euro-Office, its office engine, which always comes with it (phase 3 plan, decisi
   `init.sh` (`docker compose exec postgres psql -U ruchoir`) until the installer does it.
 - The drive's private keys go to the drive alone: `keys/drive-auth.pem` is mounted in its
   container, and Propolis's registry holds the public halves of both.
+- Each service has its own Valkey database index: Propolis `0`, the hub `1`, the drive `2`, the
+  calendar `3`. A new product takes the next one.
+- The calendar mails people invited by address. In development it uses Mailpit as Propolis does; in
+  production the installer sets no relay for either (the operator's `compose.override.yaml` does),
+  and without `CALENDAR_SMTP_HOST` the calendar logs those mails instead of sending them.
+- The calendar declares no resource scope of its own (no other service calls its API), so its client
+  has no `resource_scopes`. It asks `drive:held.manage` only when the drive is installed: Propolis
+  refuses a scope no resource of the instance declares.
+- `dev --source` builds Propolis's and the calendar's images with the npm token as the BuildKit
+  secret `npm_token` (`--secret id=npm_token,env=NODE_AUTH_TOKEN`), the id their Dockerfiles name.
 - The office editor has a hostname of its own, `office.<domain>`, which the proxy routes to the
   drive (`service: drive`), never to the engine: the drive tells the editor's requests by their
   `Host` and relays them, WebSocket included, to `http://office`. The drive refuses to start when

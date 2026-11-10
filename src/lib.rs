@@ -4,8 +4,8 @@
 //! - [`Instance`]: the domain, the mode (production or development) and the services installed.
 //!   Propolis and the hub are always there; the products are chosen ([`PRODUCTS`]).
 //! - [`secrets`]: what is generated once and kept (database passwords, Propolis's encryption key,
-//!   each service's Ed25519 keys, Garage's secrets and the drive's S3 key). Running `init` again
-//!   keeps them.
+//!   each service's Ed25519 keys, Garage's secrets and the drive's S3 key, the calendar's
+//!   encryption key). Running `init` again keeps them.
 //! - [`render`]: the files the services and the proxy read, from the instance and its secrets.
 //! - [`garage`]: the object store the drive keeps its files in: its configuration, and the commands
 //!   that prepare a fresh one.
@@ -30,15 +30,16 @@ use std::path::Path;
 /// The services every instance has.
 pub const ALWAYS: [&str; 2] = ["propolis", "hub"];
 
-/// The products that can be installed besides Propolis and the hub.
+/// The products that can be installed besides Propolis and the hub, each on its own or with the
+/// others. The calendar works alone; with the drive, its events carry files the drive keeps.
 // When the chat comes, choosing it installs the drive too: its attachments are files of the drive.
-pub const PRODUCTS: [&str; 1] = ["drive"];
+pub const PRODUCTS: [&str; 2] = ["drive", "calendar"];
 
 /// An instance to set up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
     /// The domain its services live under: `id.<domain>` for Propolis (ADR 0012), `hub.<domain>`,
-    /// `drive.<domain>`.
+    /// `drive.<domain>`, `calendar.<domain>`.
     pub domain: String,
     /// Development: `localhost`, a local certificate, a mail catcher, images built from source.
     pub dev: bool,

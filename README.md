@@ -5,7 +5,7 @@ proxy are always installed, plus the products chosen (choosing the chat also ins
 keeps the manifest of installed products, published at a `.well-known` address.
 
 > In construction: part of the restructuring of Ruchoir into separate products. Version 0 installs
-> Propolis and the hub, and the drive when asked; the other products follow.
+> Propolis and the hub, and the drive and the calendar when asked; the other products follow.
 
 ## Use
 
@@ -34,11 +34,18 @@ image, and a minute or two to start. `up` also prepares Garage the first time (i
 drive's key and bucket), and checks it again on every start. The products asked once are kept: a later
 `init` without `--products` installs them still, and none is ever removed by `init`.
 
-For development, with the `propolis` and `hub` repositories (and `drive`, with the drive) checked
-out side by side:
+The calendar comes with `--products calendar`, on its own or beside the drive
+(`--products drive,calendar`): it answers at `calendar.example.org`. With the drive, events carry
+files the drive keeps. The calendar mails the people invited by address; the installer sets no mail
+relay in production, so until you give it yours in `compose.override.yaml` (`CALENDAR_SMTP_HOST`,
+`CALENDAR_SMTP_PORT`, `CALENDAR_SMTP_USERNAME`, `CALENDAR_SMTP_PASSWORD`, `CALENDAR_SMTP_FROM`, as
+for Propolis), those mails are only logged.
+
+For development, with the `propolis` and `hub` repositories (and those of the products asked,
+`drive`, `calendar`) checked out side by side:
 
 ```sh
-NODE_AUTH_TOKEN=... ruchoir-install dev --source .. --products drive
+NODE_AUTH_TOKEN=... ruchoir-install dev --source .. --products drive,calendar
 ```
 
 builds their images, starts the instance at `https://id.localhost`, and catches every mail at
