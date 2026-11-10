@@ -1824,3 +1824,86 @@ fn every_instance_registers_the_desktop_and_mobile_apps() {
         }
     }
 }
+
+// ---- Lab, the team's tool, on a development instance ----
+
+#[test]
+fn lab_runs_on_a_development_instance_only() {
+    assert!(production().with_lab(true).is_err());
+    assert!(production().with_lab(false).is_ok());
+    assert!(Instance::development().with_lab(true).is_ok());
+}
+
+#[test]
+fn a_development_lab_signs_in_through_propolis_and_stays_out_of_the_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!ruchoir_install::lab_kept(dir.path()));
+    let instance = Instance::development()
+        .with_products(&["drive"])
+        .unwrap()
+        .with_lab(true)
+        .unwrap();
+    init(dir.path(), &instance).unwrap();
+
+    // Never a product of the instance.
+    let manifest: serde_json::Value =
+        serde_json::from_str(&read(dir.path(), "manifest.json")).unwrap();
+    assert!(manifest["services"].get("lab").is_none(), "{manifest}");
+    assert_eq!(
+        ruchoir_install::installed_products(dir.path()).unwrap(),
+        ["drive"]
+    );
+
+    // A confidential client of Propolis, which reads the organisation it lets in.
+    let registry = read(dir.path(), "propolis/clients.toml");
+    check_registry(&registry).unwrap();
+    let parsed: toml::Table = toml::from_str(&registry).unwrap();
+    let lab = parsed["client"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["client_id"].as_str() == Some("ruchoir-lab"))
+        .expect("Lab's client");
+    assert_eq!(lab["resource"].as_str(), Some("https://lab.localhost"));
+    assert_eq!(
+        lab["redirect_uris"].as_array().unwrap()[0].as_str(),
+        Some("https://lab.localhost/auth/callback")
+    );
+    let scopes: Vec<&str> = lab["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s.as_str())
+        .collect();
+    assert!(scopes.contains(&"propolis:organizations.read"));
+    assert!(!scopes.contains(&"hub:publish"));
+
+    // Its service, database, secrets, route and certificate.
+    let compose = read(dir.path(), "compose.yaml");
+    let kid = read(dir.path(), "keys/lab-auth.kid");
+    for line in [
+        "  lab:\n    image: ${LAB_IMAGE:-ruchoir/lab:dev}\n",
+        "LAB_PUBLIC_URL: https://lab.localhost",
+        "LAB_DATABASE_URL: postgres://lab:${LAB_DB_PASSWORD}@postgres:5432/lab",
+        "LAB_ISSUER: https://id.localhost",
+        "LAB_CLIENT_ID: ruchoir-lab",
+        &format!("LAB_CLIENT_KEY_ID: {}", kid.trim()),
+        "LAB_ORGANISATION: ${LAB_ORGANISATION:-}",
+        "LAB_DB_PASSWORD: ${LAB_DB_PASSWORD}",
+        "- ./keys/lab-auth.pem:/keys/lab-auth.pem:ro",
+        "- lab.localhost",
+    ] {
+        assert!(compose.contains(line), "missing {line:?}");
+    }
+    assert!(read(dir.path(), "postgres/init.sh").contains("CREATE DATABASE lab OWNER lab;"));
+    assert!(env_of(dir.path())["LAB_DB_PASSWORD"].len() >= 32);
+    assert!(read(dir.path(), "traefik/dynamic.yml").contains("rule: Host(`lab.localhost`)"));
+    assert!(ruchoir_install::lab_kept(dir.path()));
+
+    // Without it, nothing of Lab appears.
+    let other = tempfile::tempdir().unwrap();
+    init(other.path(), &Instance::development()).unwrap();
+    assert!(!read(other.path(), "compose.yaml").contains("LAB_"));
+    assert!(!read(other.path(), "propolis/clients.toml").contains("ruchoir-lab"));
+    assert!(!ruchoir_install::lab_kept(other.path()));
+}
