@@ -67,7 +67,11 @@ struct RegistryClient {
     client_id: String,
     name: String,
     first_party: bool,
-    resource: String,
+    /// `private_key_jwt` for the products (Propolis's default), `none` for the apps (PKCE).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_endpoint_auth_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     redirect_uris: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -75,12 +79,41 @@ struct RegistryClient {
     grant_types: Vec<String>,
     scopes: Vec<String>,
     resource_scopes: Vec<String>,
-    backchannel_logout_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backchannel_logout_uri: Option<String>,
     /// The audiences it may exchange a person's token for (RFC 8693), and the scopes it may ask
     /// there. Before the keys: TOML writes its arrays of tables last.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     token_exchange: Vec<RegistryExchange>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     jwks: Vec<RegistryKey>,
+}
+
+/// Ruchoir's own apps: public clients (`none`, PKCE), redirected to a loopback address on any port
+/// for the desktop and to the app's private-use scheme for the mobile (RFC 8252, sections 7.1 and
+/// 7.3). Propolis lets them ask a token for the hub and for every product installed.
+fn app(client_id: &str, name: &str, redirect: &str) -> RegistryClient {
+    RegistryClient {
+        client_id: client_id.to_owned(),
+        name: name.to_owned(),
+        first_party: true,
+        token_endpoint_auth_method: Some("none".to_owned()),
+        resource: None,
+        redirect_uris: vec![redirect.to_owned()],
+        post_logout_redirect_uris: Vec::new(),
+        grant_types: strings(&["authorization_code", "refresh_token"]),
+        scopes: strings(&[
+            "openid",
+            "profile",
+            "email",
+            "organizations",
+            "offline_access",
+        ]),
+        resource_scopes: Vec::new(),
+        backchannel_logout_uri: None,
+        token_exchange: Vec::new(),
+        jwks: Vec::new(),
+    }
 }
 
 #[derive(Serialize)]
@@ -127,7 +160,8 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
         client_id: "hub".to_owned(),
         name: "Hub".to_owned(),
         first_party: true,
-        resource: hub.clone(),
+        token_endpoint_auth_method: None,
+        resource: Some(hub.clone()),
         redirect_uris: Vec::new(),
         post_logout_redirect_uris: Vec::new(),
         // The hub reads Propolis's change feed in its own name.
@@ -136,7 +170,7 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
         scopes: strings(&["propolis:organizations.read", "propolis:mail.digest"]),
         // What the products are given to reach the hub.
         resource_scopes: strings(&["hub:publish"]),
-        backchannel_logout_uri: format!("{hub}/api/v1/backchannel-logout"),
+        backchannel_logout_uri: Some(format!("{hub}/api/v1/backchannel-logout")),
         token_exchange: Vec::new(),
         jwks: jwks("hub"),
     }];
@@ -146,7 +180,8 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             client_id: "drive".to_owned(),
             name: "Drive".to_owned(),
             first_party: true,
-            resource: drive.clone(),
+            token_endpoint_auth_method: None,
+            resource: Some(drive.clone()),
             // People sign in to the drive (its own session, `/auth/*`).
             redirect_uris: vec![format!("{drive}/auth/callback")],
             post_logout_redirect_uris: vec![format!("{drive}/")],
@@ -163,7 +198,7 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             ]),
             // What another product is given to manage the files it holds in the drive.
             resource_scopes: strings(&["drive:held.manage"]),
-            backchannel_logout_uri: format!("{drive}/auth/backchannel-logout"),
+            backchannel_logout_uri: Some(format!("{drive}/auth/backchannel-logout")),
             token_exchange: Vec::new(),
             jwks: jwks("drive"),
         });
@@ -191,7 +226,8 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             client_id: "calendar".to_owned(),
             name: "Calendar".to_owned(),
             first_party: true,
-            resource: calendar.clone(),
+            token_endpoint_auth_method: None,
+            resource: Some(calendar.clone()),
             // People sign in to the calendar (its own session, `/auth/*`), as to the drive.
             redirect_uris: vec![format!("{calendar}/auth/callback")],
             post_logout_redirect_uris: vec![format!("{calendar}/")],
@@ -199,7 +235,7 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             scopes: strings(&scopes),
             // The calendar declares no scope of its own: no other service calls its API.
             resource_scopes: Vec::new(),
-            backchannel_logout_uri: format!("{calendar}/auth/backchannel-logout"),
+            backchannel_logout_uri: Some(format!("{calendar}/auth/backchannel-logout")),
             token_exchange: Vec::new(),
             jwks: jwks("calendar"),
         });
@@ -210,7 +246,8 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             client_id: "chat".to_owned(),
             name: "Chat".to_owned(),
             first_party: true,
-            resource: chat.clone(),
+            token_endpoint_auth_method: None,
+            resource: Some(chat.clone()),
             // People sign in to the chat (its own session, `/auth/*`), as to the drive.
             redirect_uris: vec![format!("{chat}/auth/callback")],
             post_logout_redirect_uris: vec![format!("{chat}/")],
@@ -235,7 +272,7 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             ]),
             // What another product is given to reach its channels: the calendar, for its cards.
             resource_scopes: strings(&CHAT_SCOPES),
-            backchannel_logout_uri: format!("{chat}/auth/backchannel-logout"),
+            backchannel_logout_uri: Some(format!("{chat}/auth/backchannel-logout")),
             // The hub's ticket is asked with the person's token, exchanged: no scope is needed there.
             token_exchange: vec![RegistryExchange {
                 audience: hub.clone(),
@@ -244,6 +281,16 @@ pub fn registry(instance: &Instance, secrets: &Secrets) -> String {
             jwks: jwks("chat"),
         });
     }
+    client.push(app(
+        "ruchoir-desktop",
+        "Ruchoir (desktop)",
+        "http://127.0.0.1/callback",
+    ));
+    client.push(app(
+        "ruchoir-mobile",
+        "Ruchoir (mobile)",
+        "com.ruchoir.app:/oauth/callback",
+    ));
     let registry = Registry { client };
     let header =
         "# The clients of this instance, written by ruchoir-install: never edit by hand, run\n\
