@@ -9,6 +9,8 @@
 //! - [`render`]: the files the services and the proxy read, from the instance and its secrets.
 //! - [`garage`]: the object store the drive keeps its files in: its configuration, and the commands
 //!   that prepare a fresh one.
+//! - [`office`]: Euro-Office, the office engine that always comes with the drive: its service, its
+//!   files, and the drive's settings for it.
 //! - [`dev_ca`]: in development, a local certificate authority and a certificate for `*.localhost`,
 //!   which the proxy serves and the services trust.
 //!
@@ -19,6 +21,7 @@
 
 pub mod dev_ca;
 pub mod garage;
+pub mod office;
 pub mod render;
 pub mod secrets;
 
@@ -99,6 +102,16 @@ impl Instance {
             .collect()
     }
 
+    /// Every name given a public host, `<name>.<domain>` (`id` for Propolis): the services, and with
+    /// the drive the office editor's own hostname, which the proxy routes to the drive.
+    pub fn hosted(&self) -> Vec<&str> {
+        let mut names = self.services();
+        if self.has("drive") {
+            names.push(office::SERVICE);
+        }
+        names
+    }
+
     /// The public address of a service.
     pub fn url(&self, service: &str) -> String {
         let host = match service {
@@ -168,7 +181,7 @@ pub fn init(dir: &Path, instance: &Instance) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let secrets = secrets::Secrets::load_or_make(dir, instance)?;
     if instance.dev {
-        dev_ca::write(dir, &instance.domain, &instance.services())?;
+        dev_ca::write(dir, &instance.domain, &instance.hosted())?;
     }
     render::write_all(dir, instance, &secrets)
 }

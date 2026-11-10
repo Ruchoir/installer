@@ -19,15 +19,19 @@ again, and everything else written anew. Propolis answers at `id.example.org`, t
 `hub.example.org`; the certificates come from Actalis by ACME. Your own changes (the SMTP relay,
 for example) go in `compose.override.yaml`, which `init` never touches.
 
-The drive comes with `--products drive`, with Garage to keep its files:
+The drive comes with `--products drive`, with Garage to keep its files and Euro-Office to edit
+office documents live:
 
 ```sh
 ruchoir-install init --domain example.org --acme-email admin@example.org --products drive --dir /srv/ruchoir
 ruchoir-install up --dir /srv/ruchoir
 ```
 
-It answers at `drive.example.org`. `up` also prepares Garage the first time (its layout, the drive's
-key and bucket), and checks it again on every start. The products asked once are kept: a later
+It answers at `drive.example.org`, and its office editor at `office.example.org`: point both at the
+machine. The editor's engine is reached through the drive alone and has no route out; it takes about
+2 GB of memory (4 GB at most, `OFFICE_MEM_LIMIT` in `.env` to change it), 7 GB of disk for its
+image, and a minute or two to start. `up` also prepares Garage the first time (its layout, the
+drive's key and bucket), and checks it again on every start. The products asked once are kept: a later
 `init` without `--products` installs them still, and none is ever removed by `init`.
 
 For development, with the `propolis` and `hub` repositories (and `drive`, with the drive) checked

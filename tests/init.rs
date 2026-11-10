@@ -408,6 +408,131 @@ fn without_the_drive_nothing_of_it_appears() {
         ruchoir_install::installed_products(dir.path()).unwrap(),
         Vec::<String>::new()
     );
+    // Nor the office engine, which comes with the drive alone.
+    assert!(!compose.contains("office") && !compose.contains("euro-office"));
+    assert!(!compose.contains("internal: true"));
+    assert!(!read(dir.path(), "traefik/dynamic.yml").contains("office"));
+    assert!(!dir.path().join("office").exists());
+
+    let dev = tempfile::tempdir().unwrap();
+    init(dev.path(), &Instance::development()).unwrap();
+    assert!(!read(dev.path(), "dev-ca/names").contains("office"));
+    assert!(!read(dev.path(), "compose.yaml").contains("office"));
+    assert!(!dev.path().join("office").exists());
+}
+
+// ---- The office engine, which comes with the drive ----
+
+#[test]
+fn the_drive_comes_with_the_office_engine_on_a_network_with_no_route_out() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_drive(production())).unwrap();
+    let compose = read(dir.path(), "compose.yaml");
+    for line in [
+        "  office:\n    image: ghcr.io/euro-office/documentserver:v9.3.4-hotfix.1\n",
+        "JWT_ENABLED: \"true\"",
+        "JWT_SECRET: \"\"",
+        "WOPI_ENABLED: \"true\"",
+        "ALLOW_PRIVATE_IP_ADDRESS: \"true\"",
+        "EXAMPLE_ENABLED: \"false\"",
+        "mem_limit: ${OFFICE_MEM_LIMIT:-4g}",
+        "curl -fsS http://127.0.0.1/healthcheck || exit 1",
+        "start_period: 120s",
+        // The engine's network: internal, so no route out.
+        "  office:\n    internal: true\n",
+        // The engine is on it alone; the drive on it and on the instance's.
+        "    networks: [office]\n",
+        "    networks: [ruchoir, office]\n",
+    ] {
+        assert!(compose.contains(line), "missing: {line}");
+    }
+    let engine = &compose[compose.find("\n  office:\n    image:").unwrap()..];
+    assert!(engine.contains("security_opt: [no-new-privileges:true]"));
+    assert!(!engine.contains("ports:"), "the engine is published");
+    assert_eq!(compose.matches("networks: [office]").count(), 1);
+    assert_eq!(compose.matches("networks: [ruchoir, office]").count(), 1);
+
+    // Every file the engine reads is written, unchanged, and mounted read-only where it reads it.
+    for file in ruchoir_install::office::FILES {
+        assert_eq!(
+            std::fs::read(dir.path().join(file.path)).unwrap(),
+            file.bytes,
+            "{}",
+            file.path
+        );
+        let mount = format!("- ./{}:{}:ro", file.path, file.target);
+        assert!(compose.contains(&mount), "missing: {mount}");
+    }
+    for path in [
+        "office/local-production-linux.json",
+        "office/themes/theme-ruchoir-light.json",
+        "office/themes/theme-ruchoir-nuage-light.json",
+        "office/patches/editor-wopi.ejs",
+        "office/patches/visioeditor-index.html",
+    ] {
+        assert!(dir.path().join(path).exists(), "{path}");
+    }
+    assert!(compose.contains(
+        "./office/patches/editor-wopi.ejs:/var/www/euro-office/documentserver/web-apps/apps/api/wopi/editor-wopi.ejs:ro"
+    ));
+}
+
+#[test]
+fn the_drive_reaches_the_engine_and_browsers_reach_the_editor_through_the_drive() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_drive(production())).unwrap();
+    let compose = read(dir.path(), "compose.yaml");
+    for line in [
+        "DRIVE_OFFICE_URL: http://office",
+        "DRIVE_OFFICE_PUBLIC_URL: https://office.example.org",
+        "DRIVE_WOPI_LISTEN: 0.0.0.0:8081",
+        "DRIVE_WOPI_BASE_URL: http://drive:8081",
+    ] {
+        assert!(compose.contains(line), "missing: {line}");
+    }
+    // The editor's host is its own, never the drive's: the drive refuses to start otherwise.
+    assert_ne!(
+        ruchoir_install::office::public_url("example.org"),
+        "https://drive.example.org"
+    );
+
+    // The proxy routes the editor's host to the drive, which relays it to the engine.
+    let routes = read(dir.path(), "traefik/dynamic.yml");
+    assert!(routes.contains(
+        "    office:\n      rule: Host(`office.example.org`)\n      entryPoints: [websecure]\n      service: drive\n      tls:\n        certResolver: actalis\n"
+    ));
+    // No service of its own: the engine is reached through the drive alone.
+    assert!(!routes.contains("http://office"));
+
+    // The manifest lists the products, not the editor: the drive says where it is
+    // (`GET /api/v1/office`).
+    let manifest: serde_json::Value =
+        serde_json::from_str(&read(dir.path(), "manifest.json")).unwrap();
+    assert!(manifest["services"].get("office").is_none());
+    assert_eq!(
+        ruchoir_install::installed_products(dir.path()).unwrap(),
+        ["drive"]
+    );
+    // The engine has no database.
+    assert!(!read(dir.path(), "postgres/init.sh").contains("office"));
+}
+
+#[test]
+fn a_development_editor_is_covered_by_the_local_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &with_drive(Instance::development())).unwrap();
+    assert!(read(dir.path(), "dev-ca/names").contains("office.localhost\n"));
+    let compose = read(dir.path(), "compose.yaml");
+    assert!(compose.contains("DRIVE_OFFICE_PUBLIC_URL: https://office.localhost"));
+    let routes = read(dir.path(), "traefik/dynamic.yml");
+    assert!(routes.contains(
+        "    office:\n      rule: Host(`office.localhost`)\n      entryPoints: [websecure]\n      service: drive\n      tls: {}\n"
+    ));
+    assert_eq!(
+        with_drive(Instance::development()).hosted(),
+        ["propolis", "hub", "drive", "office"]
+    );
+    assert_eq!(Instance::development().hosted(), ["propolis", "hub"]);
 }
 
 #[test]
