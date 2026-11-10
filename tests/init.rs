@@ -62,7 +62,8 @@ fn the_registry_holds_the_hub_with_its_public_keys_only() {
 
     let registry: toml::Table = read(dir.path(), "propolis/clients.toml").parse().unwrap();
     let clients = registry["client"].as_array().unwrap();
-    assert_eq!(clients.len(), 1);
+    // The hub, then Ruchoir's two apps.
+    assert_eq!(clients.len(), 3);
     let hub = &clients[0];
     assert_eq!(hub["client_id"].as_str(), Some("hub"));
     assert_eq!(hub["resource"].as_str(), Some("https://hub.example.org"));
@@ -648,11 +649,24 @@ const KNOWN_SCOPES: [&str; 9] = [
     "propolis:mail.digest",
 ];
 
-fn valid_redirect(uri: &str) -> bool {
-    !uri.contains('#')
-        && !uri.contains('*')
-        && uri.starts_with("https://")
-        && uri.len() > "https://".len()
+/// `valid_redirect` of `clients.rs`: `https`, or for an app a loopback address (any port) or its
+/// private-use scheme.
+fn valid_redirect(uri: &str, public: bool) -> bool {
+    if uri.contains('#') || uri.contains('*') {
+        return false;
+    }
+    if uri.starts_with("https://") {
+        return uri.len() > "https://".len();
+    }
+    public
+        && (uri.starts_with("http://127.0.0.1/")
+            || uri.starts_with("http://127.0.0.1:")
+            || uri.split_once(":/").is_some_and(|(scheme, _)| {
+                scheme.contains('.')
+                    && scheme
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b == b'.' || b.is_ascii_digit())
+            }))
 }
 
 fn check_registry(text: &str) -> Result<(), String> {
@@ -671,8 +685,21 @@ fn check_registry(text: &str) -> Result<(), String> {
         if !ids.insert(id.clone()) {
             return Err(format!("{id} listed twice"));
         }
-        if client.token_endpoint_auth_method != "private_key_jwt" {
-            return Err(format!("{id}: the installer registers products only"));
+        // The products sign their assertions; Ruchoir's apps are public (PKCE) and hold no key.
+        let public = match client.token_endpoint_auth_method.as_str() {
+            "private_key_jwt" => false,
+            "none" => true,
+            other => return Err(format!("{id}: method {other:?}")),
+        };
+        if public
+            && (!client.first_party
+                || !client.jwks.is_empty()
+                || client.resource.is_some()
+                || client.grant_types.iter().any(|g| g == "client_credentials"))
+        {
+            return Err(format!(
+                "{id}: an app is first-party, keyless and no resource"
+            ));
         }
         if let Some(grant) = client
             .grant_types
@@ -685,7 +712,7 @@ fn check_registry(text: &str) -> Result<(), String> {
             .redirect_uris
             .iter()
             .chain(&client.post_logout_redirect_uris)
-            .find(|u| !valid_redirect(u))
+            .find(|u| !valid_redirect(u, public))
         {
             return Err(format!("{id}: redirect {uri:?}"));
         }
@@ -715,10 +742,11 @@ fn check_registry(text: &str) -> Result<(), String> {
                 return Err(format!("key id {:?} used twice", get("kid")));
             }
         }
-        if !client
-            .jwks
-            .iter()
-            .any(|k| k.get("purpose").and_then(toml::Value::as_str) == Some("client_auth"))
+        if !public
+            && !client
+                .jwks
+                .iter()
+                .any(|k| k.get("purpose").and_then(toml::Value::as_str) == Some("client_auth"))
         {
             return Err(format!("{id}: private_key_jwt needs a client_auth key"));
         }
@@ -771,7 +799,7 @@ fn the_registry_with_the_drive_passes_propolis_checks() {
 
     let registry: toml::Table = text.parse().unwrap();
     let clients = registry["client"].as_array().unwrap();
-    assert_eq!(clients.len(), 2);
+    assert_eq!(clients.len(), 4);
     let drive = clients[1].as_table().unwrap();
     let strings = |name: &str| -> Vec<&str> {
         drive[name]
@@ -1084,8 +1112,12 @@ fn the_registry_with_the_calendar_passes_propolis_checks() {
 
         let registry: toml::Table = text.parse().unwrap();
         let clients = registry["client"].as_array().unwrap();
-        assert_eq!(clients.len(), if held { 3 } else { 2 });
-        let calendar = clients.last().unwrap().as_table().unwrap();
+        assert_eq!(clients.len(), if held { 5 } else { 4 });
+        let calendar = clients
+            .iter()
+            .map(|c| c.as_table().unwrap())
+            .find(|c| c["client_id"].as_str() == Some("calendar"))
+            .unwrap();
         let strings = |name: &str| -> Vec<&str> {
             calendar[name]
                 .as_array()
@@ -1749,4 +1781,46 @@ fn a_development_hub_serves_the_manifest_too() {
         Some("/manifest/manifest.json")
     );
     assert!(compose.contains("./manifest.json:/manifest/manifest.json:ro"));
+}
+
+#[test]
+fn every_instance_registers_the_desktop_and_mobile_apps() {
+    for instance in [production(), with_drive_and_calendar(production())] {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), &instance).unwrap();
+        let text = read(dir.path(), "propolis/clients.toml");
+        check_registry(&text).unwrap();
+        let registry: toml::Table = text.parse().unwrap();
+        let clients = registry["client"].as_array().unwrap();
+        for (id, redirect) in [
+            ("ruchoir-desktop", "http://127.0.0.1/callback"),
+            ("ruchoir-mobile", "com.ruchoir.app:/oauth/callback"),
+        ] {
+            let app = clients
+                .iter()
+                .map(|c| c.as_table().unwrap())
+                .find(|c| c["client_id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("no client {id}"));
+            assert_eq!(app["token_endpoint_auth_method"].as_str(), Some("none"));
+            assert_eq!(app["first_party"].as_bool(), Some(true));
+            assert_eq!(
+                app["redirect_uris"].as_array().unwrap(),
+                &vec![toml::Value::from(redirect)]
+            );
+            let grants: Vec<&str> = app["grant_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| g.as_str().unwrap())
+                .collect();
+            assert_eq!(grants, ["authorization_code", "refresh_token"]);
+            assert!(app["scopes"]
+                .as_array()
+                .unwrap()
+                .contains(&"offline_access".into()));
+            for absent in ["resource", "jwks", "backchannel_logout_uri"] {
+                assert!(!app.contains_key(absent), "{id}: {absent}");
+            }
+        }
+    }
 }

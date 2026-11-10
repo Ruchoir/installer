@@ -173,6 +173,9 @@ calendar, on its own or beside the drive, and the chat, which always brings the 
   local authority through `SSL_CERT_FILE`.
 - The registry written for Propolis must pass Propolis's own check (`deny_unknown_fields`,
   `https` addresses, a `client_auth` key for `private_key_jwt`): change both together.
+- Every registry also lists Ruchoir's apps, `ruchoir-desktop` (`http://127.0.0.1/callback`, any port)
+  and `ruchoir-mobile` (`com.ruchoir.app:/oauth/callback`): public (`none`, PKCE), keyless, no
+  resource of their own; Propolis gives its first-party apps a token for the hub and every product.
 - Operators put their own changes in `compose.override.yaml`, which `init` never touches.
 - A fresh Garage stores nothing until its layout is applied, the drive's key imported and the
   `drive` bucket created and allowed to the key. `up` and `dev` do it after starting the instance,
