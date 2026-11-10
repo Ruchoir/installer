@@ -401,11 +401,6 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
     } else {
         ""
     };
-    let office_network = if instance.has("drive") {
-        "  # The office engine's network: the engine and the drive, no route out.\n  office:\n    internal: true\n"
-    } else {
-        ""
-    };
     let (propolis_image, hub_image) = if instance.dev {
         // Built from the repositories (`ruchoir-install dev` says how).
         ("ruchoir/propolis:dev", "ruchoir/hub:dev")
