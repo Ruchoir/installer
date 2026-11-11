@@ -140,12 +140,15 @@ pub fn service() -> String {
     # Its own network alone, with no route out: whatever a document asks it to fetch, it reaches
     # nothing but the drive.
     networks: [{SERVICE}]
+    # Its first start writes its fonts and themes, which took six and a half minutes on a busy
+    # development machine: failures count only after ten minutes, and the first answer at any time
+    # makes it healthy, so `up --wait` waits for a slow first start rather than failing it.
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/healthcheck || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 120s
+      start_period: 600s
     restart: unless-stopped
 "#
     )
