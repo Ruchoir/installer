@@ -541,6 +541,11 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
     } else {
         String::new()
     };
+    let lab_volumes = if instance.lab {
+        "  lab-captures:\n"
+    } else {
+        ""
+    };
     let lab = if instance.lab {
         products_db.push_str("      LAB_DB_PASSWORD: ${LAB_DB_PASSWORD}\n");
         lab_service(instance, secrets)
@@ -601,7 +606,7 @@ volumes:
   postgres-data:
   valkey-data:
   acme:
-{drive_volumes}
+{drive_volumes}{lab_volumes}
 services:
   postgres:
     image: postgres:18-alpine
@@ -916,7 +921,8 @@ fn chat_service(instance: &Instance, secrets: &Secrets) -> String {
     )
 }
 
-/// Lab, the team's tool, reached through the proxy alone, on a development instance. Its database
+/// Lab, the team's tool, reached through the proxy alone, on a development instance, and its runner
+/// (the browser tests and the servers' status), which writes the screenshots Lab reads. Its database
 /// password comes from `.env`. It watches the instance it runs beside: the products of the hub's
 /// manifest (`LAB_HUB_URL`). `LAB_ORGANISATION`, the organisation whose members get in, is set by
 /// hand once it exists in Propolis (`compose.override.yaml`, or the shell): until then nobody gets in.
@@ -942,13 +948,33 @@ fn lab_service(instance: &Instance, secrets: &Secrets) -> String {
       LAB_CLIENT_KEY_ID: {kid}
       LAB_ORGANISATION: ${{LAB_ORGANISATION:-}}
       LAB_HUB_URL: {hub}
+      LAB_DATA_DIR: /srv/lab/data
 {trust}    volumes:
       - ./keys/lab-auth.pem:/keys/lab-auth.pem:ro
+      - lab-captures:/srv/lab/data:ro
 {ca_volume}    networks: [ruchoir]
     depends_on:
       postgres: {{ condition: service_healthy }}
       valkey: {{ condition: service_healthy }}
       propolis: {{ condition: service_started }}
+    restart: unless-stopped
+
+  lab-runner:
+    image: ${{LAB_RUNNER_IMAGE:-ruchoir/lab-runner:dev}}
+    environment:
+      LAB_DATABASE_URL: postgres://lab:${{LAB_DB_PASSWORD}}@postgres:5432/lab
+      NODE_EXTRA_CA_CERTS: /dev-ca/ca.pem
+    volumes:
+      - lab-captures:/srv/lab/data
+      - ./dev-ca:/dev-ca:ro
+    # In the proxy's network namespace: Chromium sends every *.localhost name to the loopback, where
+    # the proxy listens. The image adds the development authority to Chromium's store at start.
+    network_mode: service:traefik
+    depends_on:
+      postgres: {{ condition: service_healthy }}
+      lab: {{ condition: service_started }}
+    init: true
+    shm_size: 1gb
     restart: unless-stopped
 "#
     )

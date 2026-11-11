@@ -1959,6 +1959,13 @@ fn a_development_lab_signs_in_through_propolis_and_stays_out_of_the_manifest() {
         "LAB_DB_PASSWORD: ${LAB_DB_PASSWORD}",
         "- ./keys/lab-auth.pem:/keys/lab-auth.pem:ro",
         "- lab.localhost",
+        // Its runner, in the proxy's network, trusting the development authority.
+        "  lab-runner:\n    image: ${LAB_RUNNER_IMAGE:-ruchoir/lab-runner:dev}\n",
+        "network_mode: service:traefik",
+        "NODE_EXTRA_CA_CERTS: /dev-ca/ca.pem",
+        "- lab-captures:/srv/lab/data:ro",
+        "LAB_DATA_DIR: /srv/lab/data",
+        "  lab-captures:\n",
     ] {
         assert!(compose.contains(line), "missing {line:?}");
     }

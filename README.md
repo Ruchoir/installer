@@ -87,7 +87,8 @@ browser. Without `--source`, the `ruchoir/<service>:dev` images must exist; `--n
 directory and builds the images without starting anything. The whole path, from the checkouts to a
 signed-in browser: [getting started](https://github.com/Ruchoir/.github/blob/main/docs/getting-started.md).
 
-`--lab` adds Lab at `https://lab.localhost`. Lab is the team's internal tool, kept in a private
+`--lab` adds Lab at `https://lab.localhost`, with its runner (the browser tests and the servers'
+status). Lab is the team's internal tool, kept in a private
 repository, so outside the team `--lab` is of no use: it needs the `lab` repository checked out
 beside the others. It is never in the manifest and never installed in production. Lab lets in the
 members of one organisation: once it exists in Propolis, set its id as `LAB_ORGANISATION` (in
