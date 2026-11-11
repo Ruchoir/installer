@@ -131,7 +131,11 @@ Lab, the team's internal tool, runs beside them on a development instance only (
 confidential client `ruchoir-lab` in Propolis's registry (`propolis:organizations.read` to read the
 organisation it lets in). It is in `Instance::services()` but never in the manifest
 (`Instance::listed()`), so it is kept across runs by its client key (`lab_kept`), not by the
-manifest. `LAB_ORGANISATION` is left to the operator (`${LAB_ORGANISATION:-}`).
+manifest. `LAB_ORGANISATION` is left to the operator (`${LAB_ORGANISATION:-}`). Its runner
+(`lab-runner`, image `ruchoir/lab-runner:dev` built from `lab/runner`) shares the proxy's network
+namespace (Chromium sends `*.localhost` to the loopback) and trusts the development authority
+(`NODE_EXTRA_CA_CERTS`, which the image also adds to Chromium's store); the screenshots go to the
+`lab-captures` volume, which Lab reads.
 
 ### How it is built
 
@@ -242,7 +246,7 @@ manifest. `LAB_ORGANISATION` is left to the operator (`${LAB_ORGANISATION:-}`).
   `infra/office/README.md` lists them), drop the patches it fixes, take the others' pages from the
   new image (`docker create`, `docker cp`) and apply the marked changes again, then check a session
   end to end. The drive's stand-in engine serves 9.3.4's discovery too.
-- The engine takes a minute or two to answer (`start_period: 120s`), and `up --wait` waits for it.
+- The engine can take minutes to answer on its first start (fonts, themes; `start_period: 600s`), and `up --wait` waits for it.
 
 ### Releases of the installer
 

@@ -248,7 +248,18 @@ fn build(source: &Path, service: &str) -> Result<(), String> {
     if service == ruchoir_install::LAB {
         command.arg("--ssh").arg("default");
     }
-    docker(command.arg(&repository))
+    docker(command.arg(&repository))?;
+    if service == ruchoir_install::LAB {
+        // Lab's runner, an image of its own, from the repository's `runner/`.
+        docker(
+            Command::new("docker")
+                .arg("build")
+                .arg("--tag")
+                .arg("ruchoir/lab-runner:dev")
+                .arg(repository.join("runner")),
+        )?;
+    }
+    Ok(())
 }
 
 fn docker(command: &mut Command) -> Result<(), String> {
