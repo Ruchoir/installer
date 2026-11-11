@@ -38,6 +38,8 @@ fn a_production_instance_is_written_whole() {
     assert!(compose.contains("registry.ruchoir.com/propolis:latest"));
     assert!(!compose.contains("mailpit"));
     assert!(!compose.contains("SSL_CERT_FILE"));
+    // PostgreSQL is ready once it answers over TCP, never on the socket its first-start setup uses.
+    assert!(compose.contains(r#"test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ruchoir"]"#));
 
     let traefik = read(dir.path(), "traefik/traefik.yml");
     assert!(traefik.contains("https://acme-api.actalis.com/acme/directory"));
