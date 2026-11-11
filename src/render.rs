@@ -614,8 +614,10 @@ services:
       - postgres-data:/var/lib/postgresql
       - ./postgres/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
     networks: [ruchoir]
+    # Over TCP: while the image runs init.sh on its first start, PostgreSQL listens on its socket
+    # alone and stops again, and a check on the socket would let the services start too early.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ruchoir"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ruchoir"]
       interval: 5s
       retries: 20
     restart: unless-stopped
