@@ -392,6 +392,68 @@ fn adding_the_drive_issues_the_development_certificate_again_from_the_same_autho
     assert!(names.contains(&"id.localhost".to_owned()));
 }
 
+/// The DER bytes of a PEM certificate.
+fn der(pem: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .unwrap()
+}
+
+fn has_extension(der: &[u8], oid: &[u8]) -> bool {
+    der.windows(oid.len()).any(|w| w == oid)
+}
+
+/// The encoded object identifiers of the key usage and authority key identifier extensions.
+const KEY_USAGE: [u8; 5] = [0x06, 0x03, 0x55, 0x1d, 0x0f];
+const AUTHORITY_KEY_ID: [u8; 5] = [0x06, 0x03, 0x55, 0x1d, 0x23];
+
+#[test]
+fn the_development_certificates_pass_strict_verifiers() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &Instance::development()).unwrap();
+    // Python 3.13 and OpenSSL's strict mode refuse an authority without key usage and a
+    // certificate that does not name its authority's key.
+    assert!(has_extension(
+        &der(&read(dir.path(), "dev-ca/ca.pem")),
+        &KEY_USAGE
+    ));
+    assert!(has_extension(
+        &der(&read(dir.path(), "dev-ca/cert.pem")),
+        &AUTHORITY_KEY_ID
+    ));
+    assert_eq!(
+        read(dir.path(), "dev-ca/profile"),
+        ruchoir_install::dev_ca::PROFILE
+    );
+}
+
+#[test]
+fn certificates_of_an_earlier_profile_are_issued_again_by_the_same_key() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &Instance::development()).unwrap();
+    // An instance written before the profile was recorded.
+    std::fs::remove_file(dir.path().join("dev-ca/profile")).unwrap();
+    let key = read(dir.path(), "dev-ca/ca-key.pem");
+    let ca = read(dir.path(), "dev-ca/ca.pem");
+    let cert = read(dir.path(), "dev-ca/cert.pem");
+
+    init(dir.path(), &Instance::development()).unwrap();
+    assert_eq!(key, read(dir.path(), "dev-ca/ca-key.pem"));
+    assert_ne!(ca, read(dir.path(), "dev-ca/ca.pem"));
+    assert_ne!(cert, read(dir.path(), "dev-ca/cert.pem"));
+    assert_eq!(
+        read(dir.path(), "dev-ca/profile"),
+        ruchoir_install::dev_ca::PROFILE
+    );
+
+    // Once current, the authority stays as it is.
+    let ca = read(dir.path(), "dev-ca/ca.pem");
+    init(dir.path(), &with_drive(Instance::development())).unwrap();
+    assert_eq!(ca, read(dir.path(), "dev-ca/ca.pem"));
+}
+
 #[test]
 fn without_the_drive_nothing_of_it_appears() {
     let dir = tempfile::tempdir().unwrap();

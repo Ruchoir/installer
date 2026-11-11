@@ -8,7 +8,10 @@
 
 use std::path::Path;
 
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
+};
 
 use crate::secrets::write_private;
 
@@ -25,15 +28,21 @@ pub fn names(domain: &str, services: &[&str]) -> Vec<String> {
     }
     names
 }
-
 fn fail(e: rcgen::Error) -> String {
     format!("development certificate: {e}")
 }
+
+/// What the certificates written here carry, recorded in `dev-ca/profile`. Version 2: the authority
+/// says what its key may sign (key usage) and the certificate names the authority's key (authority
+/// key identifier), which strict verifiers ask for (Python since 3.13, OpenSSL's `-x509_strict`).
+/// Certificates of an earlier profile are issued again.
+pub const PROFILE: &str = "2\n";
 
 /// The authority's parameters, the same each time, so a kept key signs as the kept certificate.
 fn authority_params() -> Result<CertificateParams, String> {
     let mut params = CertificateParams::new(Vec::<String>::new()).map_err(fail)?;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params
         .distinguished_name
         .push(DnType::CommonName, "Ruchoir development authority");
@@ -42,7 +51,8 @@ fn authority_params() -> Result<CertificateParams, String> {
 
 /// Write `dev-ca/ca.pem` (the authority, public) and its key `dev-ca/ca-key.pem`, then
 /// `dev-ca/cert.pem` and `dev-ca/key.pem` (what the proxy serves) with the names they cover in
-/// `dev-ca/names`. What is there already is kept, unless the certificate lacks a service's host.
+/// `dev-ca/names`. What is there already is kept, unless the certificate lacks a service's host or
+/// was written to an earlier [`PROFILE`].
 pub fn write(dir: &Path, domain: &str, services: &[&str]) -> Result<(), String> {
     let ca_dir = dir.join("dev-ca");
     let path = |name: &str| ca_dir.join(name);
@@ -53,14 +63,22 @@ pub fn write(dir: &Path, domain: &str, services: &[&str]) -> Result<(), String> 
     let names = names(domain, services);
     let listed = names.join("\n") + "\n";
     let has_cert = path("cert.pem").exists();
-    if has_cert && read("names").as_deref() == Some(listed.as_str()) {
+    let current = read("profile").as_deref() == Some(PROFILE);
+    if has_cert && current && read("names").as_deref() == Some(listed.as_str()) {
         return Ok(());
     }
     std::fs::create_dir_all(&ca_dir).map_err(|e| format!("{}: {e}", ca_dir.display()))?;
 
     let issuer = match (read("ca.pem"), read("ca-key.pem")) {
         (Some(_), Some(key)) => {
-            Issuer::new(authority_params()?, KeyPair::from_pem(&key).map_err(fail)?)
+            let key = KeyPair::from_pem(&key).map_err(fail)?;
+            let params = authority_params()?;
+            if !current {
+                // An authority of an earlier profile is signed again by its own key, under the same
+                // name: a browser told to trust the one before keeps trusting what it signs.
+                save("ca.pem", &params.self_signed(&key).map_err(fail)?.pem())?;
+            }
+            Issuer::new(params, key)
         }
         // An authority made before its key was kept: its certificate stays, covering the new hosts
         // through `*.<domain>`, since nothing could sign a new one.
@@ -80,8 +98,12 @@ pub fn write(dir: &Path, domain: &str, services: &[&str]) -> Result<(), String> 
     leaf_params
         .distinguished_name
         .push(DnType::CommonName, format!("*.{domain}"));
+    leaf_params.use_authority_key_identifier_extension = true;
+    leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     let leaf = leaf_params.signed_by(&leaf_key, &issuer).map_err(fail)?;
     save("cert.pem", &leaf.pem())?;
     write_private(&path("key.pem"), &leaf_key.serialize_pem())?;
-    save("names", &listed)
+    save("names", &listed)?;
+    save("profile", PROFILE)
 }
