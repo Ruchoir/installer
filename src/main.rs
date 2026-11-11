@@ -231,7 +231,8 @@ fn bootstrap_garage(dir: &Path) -> Result<(), String> {
 
 /// Build a service's development image from its repository. Propolis's and the products' pages need
 /// the organization's npm packages: the token is read from `NODE_AUTH_TOKEN`, as the build secret
-/// `npm_token` their Dockerfiles name, never a layer.
+/// `npm_token` their Dockerfiles name, never a layer. Lab's licence crate comes from a private
+/// repository over SSH: its build is lent the developer's SSH agent (`--ssh default`).
 fn build(source: &Path, service: &str) -> Result<(), String> {
     let repository = source.join(service);
     let mut command = Command::new("docker");
@@ -243,6 +244,9 @@ fn build(source: &Path, service: &str) -> Result<(), String> {
         command
             .arg("--secret")
             .arg("id=npm_token,env=NODE_AUTH_TOKEN");
+    }
+    if service == ruchoir_install::LAB {
+        command.arg("--ssh").arg("default");
     }
     docker(command.arg(&repository))
 }
