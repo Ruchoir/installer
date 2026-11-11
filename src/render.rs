@@ -917,11 +917,13 @@ fn chat_service(instance: &Instance, secrets: &Secrets) -> String {
 }
 
 /// Lab, the team's tool, reached through the proxy alone, on a development instance. Its database
-/// password comes from `.env`. `LAB_ORGANISATION`, the organisation whose members get in, is set by
+/// password comes from `.env`. It watches the instance it runs beside: the products of the hub's
+/// manifest (`LAB_HUB_URL`). `LAB_ORGANISATION`, the organisation whose members get in, is set by
 /// hand once it exists in Propolis (`compose.override.yaml`, or the shell): until then nobody gets in.
 fn lab_service(instance: &Instance, secrets: &Secrets) -> String {
     let lab = instance.url(crate::LAB);
     let propolis = instance.url("propolis");
+    let hub = instance.url("hub");
     let kid = &secrets.key(crate::LAB, "auth").kid;
     let (trust, ca_volume) = (trust_of(instance), ca_volume_of(instance));
     format!(
@@ -939,6 +941,7 @@ fn lab_service(instance: &Instance, secrets: &Secrets) -> String {
       LAB_CLIENT_KEY: /keys/lab-auth.pem
       LAB_CLIENT_KEY_ID: {kid}
       LAB_ORGANISATION: ${{LAB_ORGANISATION:-}}
+      LAB_HUB_URL: {hub}
 {trust}    volumes:
       - ./keys/lab-auth.pem:/keys/lab-auth.pem:ro
 {ca_volume}    networks: [ruchoir]
