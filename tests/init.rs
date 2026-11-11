@@ -1953,6 +1953,8 @@ fn a_development_lab_signs_in_through_propolis_and_stays_out_of_the_manifest() {
         "LAB_CLIENT_ID: ruchoir-lab",
         &format!("LAB_CLIENT_KEY_ID: {}", kid.trim()),
         "LAB_ORGANISATION: ${LAB_ORGANISATION:-}",
+        // The status of the servers follows the products of this instance's manifest.
+        "LAB_HUB_URL: https://hub.localhost",
         "LAB_DB_PASSWORD: ${LAB_DB_PASSWORD}",
         "- ./keys/lab-auth.pem:/keys/lab-auth.pem:ro",
         "- lab.localhost",
