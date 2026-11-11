@@ -502,7 +502,8 @@ fn the_drive_comes_with_the_office_engine_on_a_network_with_no_route_out() {
         "EXAMPLE_ENABLED: \"false\"",
         "mem_limit: ${OFFICE_MEM_LIMIT:-4g}",
         "curl -fsS http://127.0.0.1/healthcheck || exit 1",
-        "start_period: 120s",
+        // A slow first start (fonts and themes) is waited for, not failed.
+        "start_period: 600s",
         // The engine's network: internal, so no route out.
         "  office:\n    internal: true\n",
         // The engine is on it alone; the drive on it and on the instance's.
