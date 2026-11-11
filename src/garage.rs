@@ -1,6 +1,6 @@
 //! Garage (Deuxfleurs, France; AGPL-3.0), the object store the drive keeps its files' bytes in: one
 //! node inside the instance, reached by the drive at `http://garage:3900` on the instance's network
-//! and published nowhere (phase 3 plan, decision 3).
+//! and published nowhere.
 //!
 //! - [`config`]: `garage/garage.toml`. Its secrets are not in it: Garage reads `GARAGE_RPC_SECRET`
 //!   and `GARAGE_ADMIN_TOKEN` from its environment, which compose fills from `.env`.

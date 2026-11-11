@@ -1,9 +1,9 @@
-//! Euro-Office, the office engine, installed with the drive (phase 3 plan, decision 4: always with
-//! the drive, never on its own). The drive is its WOPI host: the engine opens and saves documents
-//! through the drive's WOPI listener (`http://drive:8081`), and browsers reach the editor at a
-//! hostname of its own, `office.<domain>`, which the proxy routes to the drive and the drive relays
-//! to the engine. The engine is published nowhere and has no route out: it sits on a network of its
-//! own, `office`, that only the drive shares.
+//! Euro-Office, the office engine, installed with the drive (always with the drive, never on its
+//! own). The drive is its WOPI host: the engine opens and saves documents through the drive's WOPI
+//! listener (`http://drive:8081`), and browsers reach the editor at a hostname of its own,
+//! `office.<domain>`, which the proxy routes to the drive and the drive relays to the engine. The
+//! engine is published nowhere and has no route out: it sits on a network of its own, `office`,
+//! that only the drive shares.
 //!
 //! - [`FILES`]: the files the engine mounts read-only, its settings, the Ruchoir themes and two
 //!   patched pages. They are copied, unchanged, from the monolith's `infra/office/` and built into

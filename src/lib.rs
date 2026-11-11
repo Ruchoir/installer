@@ -1,5 +1,5 @@
-//! `ruchoir-install`: what an instance is made of, written to one directory (plan of the installer v0,
-//! ADR 0004 and 0012 of `Ruchoir/.github`).
+//! `ruchoir-install`: what an instance is made of, written to one directory (ADR 0004 and 0012 of
+//! `Ruchoir/.github`).
 //!
 //! - [`Instance`]: the domain, the mode (production or development) and the services installed.
 //!   Propolis and the hub are always there; the products are chosen ([`PRODUCTS`]).
@@ -42,7 +42,7 @@ pub const PRODUCTS: [&str; 3] = ["drive", "calendar", "chat"];
 pub const REQUIRES: [(&str, &str); 1] = [("chat", "drive")];
 
 /// Lab, the team's internal tool: a service of a development instance when asked (`dev --lab`), never
-/// a product of the manifest nor offered to customers (plan of phase 7, decision 9).
+/// a product of the manifest nor offered to customers.
 pub const LAB: &str = "lab";
 
 /// An instance to set up.

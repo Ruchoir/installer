@@ -122,9 +122,8 @@ keeps the manifest of installed products, which the hub publishes at a `.well-kn
 
 **Status:** v0. `ruchoir-install` writes an instance's directory and runs it with Docker Compose:
 Propolis, the hub and the proxy, in production (`init`, `up`, `down`) or on `*.localhost` (`dev`).
-The products are added with their phases (`--products`): the drive, with Garage for its files and
-Euro-Office, its office engine, which always comes with it (phase 3 plan, decision 4), the
-calendar, on its own or beside the drive, and the chat, which always brings the drive
+The products are chosen with `--products`: the drive, with Garage for its files and
+Euro-Office, its office engine, which always comes with it, the calendar, on its own or beside the drive, and the chat, which always brings the drive
 (`REQUIRES` in `src/lib.rs`, applied where the products asked are checked).
 
 Lab, the team's internal tool, runs beside them on a development instance only (`dev --lab`,
@@ -244,6 +243,11 @@ manifest. `LAB_ORGANISATION` is left to the operator (`${LAB_ORGANISATION:-}`).
   new image (`docker create`, `docker cp`) and apply the marked changes again, then check a session
   end to end. The drive's stand-in engine serves 9.3.4's discovery too.
 - The engine takes a minute or two to answer (`start_period: 120s`), and `up --wait` waits for it.
+
+### Releases of the installer
+
+No release workflow yet: a tag of this repository publishes nothing, and the installer is built
+from a checkout (`cargo install --path .`). The images it runs are the services' own.
 
 ### Boundaries
 
