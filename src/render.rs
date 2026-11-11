@@ -1,4 +1,4 @@
-//! The files of an instance, written from it and its secrets (plan of the installer v0).
+//! The files of an instance, written from it and its secrets.
 //!
 //! - `manifest.json`: the services installed and their addresses (ADR 0004), versioned. Lab is never
 //!   listed: it is the team's tool, not a product of the instance.
