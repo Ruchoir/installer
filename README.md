@@ -87,6 +87,14 @@ browser. Without `--source`, the `ruchoir/<service>:dev` images must exist; `--n
 directory and builds the images without starting anything. The whole path, from the checkouts to a
 signed-in browser: [getting started](https://github.com/Ruchoir/.github/blob/main/docs/getting-started.md).
 
+Browsers send every `*.localhost` name to this machine. Other programs ask the system, and Windows
+(unlike most Linux systems) does not resolve them: a script, `curl` or the desktop app then fails on
+`id.localhost`. `ruchoir-install hosts` prints a hosts-file line for each of the instance's names;
+`ruchoir-install hosts --write`, from a terminal run as administrator (with `sudo` elsewhere), puts
+them in the system's hosts file between two marker lines, replacing what an earlier run wrote there.
+Run it again after adding a product. Those programs must also trust `ruchoir-dev/dev-ca/ca.pem`
+(`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `RUCHOIR_EXTRA_CA` for the desktop app).
+
 `--lab` adds Lab at `https://lab.localhost`, with its runner (the browser tests and the servers'
 status). Lab is the team's internal tool, kept in a private
 repository, so outside the team `--lab` is of no use: it needs the `lab` repository checked out
