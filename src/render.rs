@@ -509,8 +509,69 @@ http:
     )
 }
 
-/// The compose file.
-pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
+/// The Compose project's name, which prefixes the containers, the network and the volumes: `ruchoir`
+/// for a production instance. In development, the directory's name (prefixed with `ruchoir-` unless
+/// it starts with it) and a short hash of its full path (`ruchoir-dev-1a2b3c4d`), so two development
+/// instances in different directories, even both named `ruchoir-dev`, never share their volumes
+/// (the databases of one would answer the other with other passwords).
+pub fn project_name(instance: &Instance, dir: &Path) -> String {
+    if !instance.dev {
+        return "ruchoir".to_owned();
+    }
+    let path = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let folder = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!(
+        "{}-{:08x}",
+        project_of_folder(&folder),
+        fnv1a(path.to_string_lossy().as_bytes())
+    )
+}
+
+/// FNV-1a on 32 bits: stable across runs and versions, unlike the standard library's hasher.
+fn fnv1a(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5, |hash, byte| {
+        (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+    })
+}
+
+/// A Compose project name from a directory's name: lower case letters, digits, `-` and `_` only.
+pub fn project_of_folder(folder: &str) -> String {
+    let name: String = folder
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let name = name.trim_matches(|c: char| c == '-' || c == '_');
+    if name.is_empty() {
+        "ruchoir-dev".to_owned()
+    } else if name.starts_with("ruchoir") {
+        name.to_owned()
+    } else {
+        format!("ruchoir-{name}")
+    }
+}
+
+/// In development, the hub wakes no phone: the publisher's push relay is for real instances.
+fn push_relay_of(instance: &Instance) -> &'static str {
+    if instance.dev {
+        "      HUB_PUSH_RELAY_URL: \"\"\n"
+    } else {
+        ""
+    }
+}
+
+/// The compose file, for the Compose project `project` ([`project_name`]).
+pub fn compose(instance: &Instance, secrets: &Secrets, project: &str) -> String {
+    let push_relay = push_relay_of(instance);
     let hub_kid = &secrets.key("hub", "auth").kid;
     let page_origins = page_origins(instance);
     let propolis = instance.url("propolis");
@@ -594,7 +655,7 @@ pub fn compose(instance: &Instance, secrets: &Secrets) -> String {
         r#"# A Ruchoir instance, written by ruchoir-install: run `ruchoir-install init` again rather than
 # editing it, and put your own changes in compose.override.yaml, which it never touches. The secrets
 # are in .env.
-name: ruchoir
+name: {project}
 
 networks:
   ruchoir:
@@ -690,7 +751,7 @@ services:
       HUB_PAGE_ORIGINS: {page_origins}
       HUB_VAPID_KEY: /keys/hub-vapid.pem
       HUB_MANIFEST: /manifest/manifest.json
-{trust}    volumes:
+{push_relay}{trust}    volumes:
       - ./hub:/config:ro
       - ./manifest.json:/manifest/manifest.json:ro
       - ./keys/hub-auth.pem:/keys/hub-auth.pem:ro
@@ -994,6 +1055,10 @@ pub fn write_all(dir: &Path, instance: &Instance, secrets: &Secrets) -> Result<(
     }
     write(dir, "traefik/traefik.yml", &traefik_static(instance))?;
     write(dir, "traefik/dynamic.yml", &traefik_dynamic(instance))?;
-    write(dir, "compose.yaml", &compose(instance, secrets))?;
+    write(
+        dir,
+        "compose.yaml",
+        &compose(instance, secrets, &project_name(instance, dir)),
+    )?;
     Ok(())
 }

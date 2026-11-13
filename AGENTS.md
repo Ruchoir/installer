@@ -200,6 +200,13 @@ namespace (Chromium sends `*.localhost` to the loopback) and trusts the developm
   and `ruchoir-mobile` (`com.ruchoir.app:/oauth/callback`): public (`none`, PKCE), keyless, no
   resource of their own; Propolis gives its first-party apps a token for the hub and every product.
 - Operators put their own changes in `compose.override.yaml`, which `init` never touches.
+- The Compose project is `ruchoir` in production, and in development the directory's name and a
+  hash of its path (`render::project_name`), so two development directories never share volumes
+  (the second would find the first's database, with other passwords, and Propolis would not start).
+  A development instance written before this rule ran as `ruchoir`: its old volumes stay under that
+  name (`docker volume ls`), and the instance starts on fresh ones.
+- In development the hub's `HUB_PUSH_RELAY_URL` is empty: without it the hub would call the
+  publisher's production relay (its default) for every phone a developer subscribes.
 - A fresh Garage stores nothing until its layout is applied, the drive's key imported and the
   `drive` bucket created and allowed to the key. `up` and `dev` do it after starting the instance,
   through `docker compose exec -T garage /garage` (the image has no shell), and again on every start:

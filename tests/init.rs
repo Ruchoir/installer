@@ -200,6 +200,55 @@ fn a_development_instance_runs_on_localhost_with_its_own_authority() {
 }
 
 #[test]
+fn a_development_hub_wakes_no_phone_and_a_production_one_keeps_the_relay() {
+    let dev = tempfile::tempdir().unwrap();
+    init(dev.path(), &Instance::development()).unwrap();
+    let compose = read(dev.path(), "compose.yaml");
+    assert_eq!(
+        compose_env(&compose, "hub", "HUB_PUSH_RELAY_URL").as_deref(),
+        Some("\"\"")
+    );
+    let prod = tempfile::tempdir().unwrap();
+    init(prod.path(), &production()).unwrap();
+    let compose = read(prod.path(), "compose.yaml");
+    assert_eq!(compose_env(&compose, "hub", "HUB_PUSH_RELAY_URL"), None);
+}
+
+#[test]
+fn each_development_directory_is_its_own_compose_project() {
+    let project = |dir: &Path| {
+        let compose = read(dir, "compose.yaml");
+        compose
+            .lines()
+            .find_map(|l| l.strip_prefix("name: "))
+            .unwrap()
+            .to_owned()
+    };
+    let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (
+        one.path().join("ruchoir-dev"),
+        two.path().join("ruchoir-dev"),
+    );
+    init(&a, &Instance::development()).unwrap();
+    init(&b, &Instance::development()).unwrap();
+    let (pa, pb) = (project(&a), project(&b));
+    assert!(pa.starts_with("ruchoir-dev-") && pb.starts_with("ruchoir-dev-"));
+    assert_ne!(pa, pb, "two directories share a Compose project");
+    init(&a, &Instance::development()).unwrap();
+    assert_eq!(project(&a), pa, "the project changed on a second run");
+    let other = one.path().join("Second Try");
+    init(&other, &Instance::development()).unwrap();
+    assert!(project(&other).starts_with("ruchoir-second-try-"));
+    let prod = tempfile::tempdir().unwrap();
+    init(prod.path(), &production()).unwrap();
+    assert_eq!(project(prod.path()), "ruchoir");
+    assert_eq!(
+        ruchoir_install::render::project_of_folder("..."),
+        "ruchoir-dev"
+    );
+}
+
+#[test]
 fn only_domain_names_are_taken() {
     for domain in [
         "localhost",
