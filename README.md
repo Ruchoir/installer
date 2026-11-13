@@ -87,6 +87,12 @@ browser. Without `--source`, the `ruchoir/<service>:dev` images must exist; `--n
 directory and builds the images without starting anything. The whole path, from the checkouts to a
 signed-in browser: [getting started](https://github.com/Ruchoir/.github/blob/main/docs/getting-started.md).
 
+A development instance is its own Compose project, named after its directory and a short hash of
+its path (`ruchoir-dev-1a2b3c4d`), so two directories never share their data. They still
+take the same ports (443 and 8025) and network: stop one (`ruchoir-install down --dir ...`) before
+starting another. Its hub wakes no phone (`HUB_PUSH_RELAY_URL` is empty): the publisher's push relay
+is for real instances.
+
 Browsers send every `*.localhost` name to this machine. Other programs ask the system, and Windows
 (unlike most Linux systems) does not resolve them: a script, `curl` or the desktop app then fails on
 `id.localhost`. `ruchoir-install hosts` prints a hosts-file line for each of the instance's names;
