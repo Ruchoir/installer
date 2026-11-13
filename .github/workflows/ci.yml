@@ -21,8 +21,11 @@ jobs:
 
   # The exit test of the installer: a development instance built from the repositories of Propolis and
   # the hub, then a person signing up, confirming their address and signing in, in a browser.
+  # Off until the repository variable RUCHOIR_E2E is `on`: Propolis's checkout and its npm packages
+  # need the access described in AGENTS.md, and a job that cannot pass would only be noise.
   e2e:
     name: End to end
+    if: vars.RUCHOIR_E2E == 'on'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -32,19 +35,20 @@ jobs:
       - name: Check out the installer
         uses: actions/checkout@v7.0.1
 
-      # A fine-grained token that reads the two repositories' contents, and nothing else.
+      # A fine-grained token that reads the two repositories' contents, and nothing else; the job's
+      # own token is enough for a public repository.
       - name: Check out Propolis
         uses: actions/checkout@v7.0.1
         with:
           repository: Ruchoir/propolis
-          token: ${{ secrets.RUCHOIR_E2E_TOKEN }}
+          token: ${{ secrets.RUCHOIR_E2E_TOKEN || github.token }}
           path: source/propolis
 
       - name: Check out the hub
         uses: actions/checkout@v7.0.1
         with:
           repository: Ruchoir/hub
-          token: ${{ secrets.RUCHOIR_E2E_TOKEN }}
+          token: ${{ secrets.RUCHOIR_E2E_TOKEN || github.token }}
           path: source/hub
 
       - name: Build the installer

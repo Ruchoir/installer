@@ -275,8 +275,9 @@ This repository's own decisions go in `docs/adr/`.
   `cargo deny --config "$RULES/deny.toml" check`, as the shared `rust` workflow runs them.
 - The end-to-end test (`e2e/`, Playwright, an accepted exception for tests only): with a
   development instance up (`ruchoir-install dev --source ..`), `pnpm install` then `pnpm test` in
-  `e2e/`. In CI it checks out Propolis and the hub with `RUCHOIR_E2E_TOKEN`, a fine-grained token
-  that reads their contents only; the installer's own token reads the `@ruchoir` npm packages, which
-  grant this repository access.
+  `e2e/`. In CI the job runs once the repository variable `RUCHOIR_E2E` is `on`. It checks out
+  Propolis and the hub with `RUCHOIR_E2E_TOKEN`, a fine-grained token that reads their contents only
+  (the job's own token, for a repository that is public); the installer's own token reads the
+  `@ruchoir` npm packages, which must grant this repository access.
 
 Licence: `AGPL-3.0-only` (`LICENSE`).
