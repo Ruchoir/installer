@@ -182,6 +182,9 @@ namespace (Chromium sends `*.localhost` to the loopback) and trusts the developm
   (AGPL-3.0). None of the files names anything of an instance, so they are written as they are.
 - `src/dev_ca.rs`: in development, a local certificate authority the proxy and the services trust.
   Its certificate is issued again, by the same authority, when a product adds a host.
+- `src/hosts.rs`: the hosts-file block of a development instance (`ruchoir-install hosts`), for
+  the programs that do not resolve `*.localhost` (anything but a browser on Windows): one line per
+  host on each loopback, between marker lines, so `--write` replaces its own block and nothing else.
 - `src/main.rs`: the command line.
 
 ### Gotchas

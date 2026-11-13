@@ -23,6 +23,7 @@
 
 pub mod dev_ca;
 pub mod garage;
+pub mod hosts;
 pub mod office;
 pub mod render;
 pub mod secrets;
@@ -144,6 +145,14 @@ impl Instance {
             names.push(office::SERVICE);
         }
         names
+    }
+
+    /// The host name of each of [`Instance::hosted`] (`id.<domain>` for Propolis).
+    pub fn host_names(&self) -> Vec<String> {
+        self.hosted()
+            .into_iter()
+            .map(|s| self.url(s).trim_start_matches("https://").to_owned())
+            .collect()
     }
 
     /// The public address of a service.

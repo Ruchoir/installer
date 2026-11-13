@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use ruchoir_install::{
-    garage, init, installed_products, lab_kept, products_kept, secrets, Instance,
+    garage, hosts, init, installed_products, lab_kept, products_kept, secrets, Instance,
 };
 
 #[derive(Parser)]
@@ -68,6 +68,17 @@ enum Commands {
         /// Kept once installed.
         #[arg(long)]
         lab: bool,
+    },
+    /// The hosts-file lines that send a development instance's names to this machine, for the
+    /// programs that do not resolve `*.localhost` themselves (on Windows, anything but a browser).
+    /// Printed; with `--write`, put in the system's hosts file (run as administrator on Windows,
+    /// with sudo elsewhere), replacing what an earlier run wrote.
+    Hosts {
+        #[arg(long, default_value = "ruchoir-dev")]
+        dir: PathBuf,
+        /// Write them to the system's hosts file instead of printing them.
+        #[arg(long)]
+        write: bool,
     },
 }
 
@@ -136,6 +147,45 @@ fn run(command: Commands) -> Result<(), String> {
                 "Ruchoir runs at {}. Trust {} in your browser; mails are read at http://localhost:8025.",
                 instance.url("propolis"),
                 dir.join("dev-ca").join("ca.pem").display()
+            );
+            if cfg!(windows) {
+                println!(
+                    "Outside a browser, Windows does not resolve *.localhost: `ruchoir-install hosts --dir {} --write`, as administrator, adds the names to its hosts file.",
+                    dir.display()
+                );
+            }
+            Ok(())
+        }
+        Commands::Hosts { dir, write } => {
+            if !dir.join("manifest.json").exists() {
+                return Err(format!(
+                    "{} holds no instance: run `ruchoir-install dev` first",
+                    dir.display()
+                ));
+            }
+            let instance = Instance::development()
+                .with_products(&products_kept::<&str>(&dir, &[])?)?
+                .with_lab(lab_kept(&dir))?;
+            let block = hosts::block(&instance.host_names());
+            if !write {
+                print!("{block}");
+                return Ok(());
+            }
+            let path = hosts::system_file();
+            let existing =
+                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let merged = hosts::merge(&existing, &block);
+            if merged != existing {
+                std::fs::write(&path, merged).map_err(|e| {
+                    format!(
+                        "{}: {e} (run as administrator on Windows, with sudo elsewhere)",
+                        path.display()
+                    )
+                })?;
+            }
+            println!(
+                "{} sends the instance's names to this machine.",
+                path.display()
             );
             Ok(())
         }
