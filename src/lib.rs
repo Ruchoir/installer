@@ -24,6 +24,7 @@
 pub mod dev_ca;
 pub mod garage;
 pub mod hosts;
+pub mod migrate;
 pub mod office;
 pub mod render;
 pub mod secrets;

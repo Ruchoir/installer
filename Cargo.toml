@@ -34,6 +34,23 @@ base64 = "0.23.1"
 # aws-lc-rs, as everywhere else.
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto"] }
 
+# `migrate`, which carries a monolith instance's data over (src/migrate):
+# its runtime (tokio project, community, MIT),
+tokio = { version = "1.54.1", features = ["rt", "macros", "net", "time"] }
+# the PostgreSQL client it reads and writes with (rust-postgres, community, MIT/Apache-2.0),
+tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1"] }
+# the secrets kept encrypted at rest, opened with the monolith's key and closed with the new one
+# (RustCrypto, community, MIT/Apache-2.0),
+aes-gcm = "0.11.1"
+# the VAPID key, written as the PEM the hub reads (RustCrypto, community, MIT/Apache-2.0),
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std", "pkcs8", "pem"] }
+# the ids made for the files a product now holds, the same on every run (uuid-rs, community,
+# MIT/Apache-2.0),
+uuid = { version = "1.29.2", features = ["v4", "v5", "serde"] }
+# the drive's object store, over S3 on the loopback (rust-s3, community, MIT; as the drive uses it,
+# without TLS),
+rust-s3 = { version = "0.38.0", default-features = false, features = ["with-tokio", "fail-on-err"] }
+
 [dev-dependencies]
 # A throwaway instance directory per test (Stebalien and community, MIT/Apache-2.0).
 tempfile = "3.27.0"

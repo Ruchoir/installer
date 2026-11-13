@@ -17,7 +17,8 @@ products' logic. How the pieces fit: [architecture](https://github.com/Ruchoir/.
 
 `init`, `up` and `down` set up and run a production instance under your domain, with certificates
 from Actalis by ACME; `dev` runs a development instance on `*.localhost`, built from the services'
-repositories. Not here yet: published images of the services (a production instance needs images
+repositories; `migrate` moves the data of an instance of the former single application
+(`Ruchoir/ruchoir`) into a new one ([runbook](docs/migrate-monolith.md)). Not here yet: published images of the services (a production instance needs images
 built from their repositories, see [deployment](docs/deployment.md#images)), a backup or restore
 command, an update command, removing a product, and a certificate you bring yourself.
 
@@ -116,7 +117,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The tests run `init` on throwaway directories and read what it wrote: they need no Docker. The CI
+The tests run `init` on throwaway directories and read what it wrote: they need no Docker. The
+migration's test (`tests/migrate.rs`) also needs a PostgreSQL it may create databases in, named by
+`RUCHOIR_MIGRATE_TEST_DATABASE` (`host=127.0.0.1 port=5432 user=postgres password=postgres`, no
+database); without it, it says so and passes. The CI
 also runs `cargo deny --config "$RULES/deny.toml" check`, with a clone of `Ruchoir/.github` at
 `$RULES`.
 
@@ -134,7 +138,9 @@ and in [deployment](docs/deployment.md).
 - [`docs/email-delivery.md`](docs/email-delivery.md): giving the instance a mail relay, and what
   works without one.
 - [`docs/backup.md`](docs/backup.md): what to save and how to put it back.
-- [`docs/adr/`](docs/adr/README.md): this repository's decisions (none yet).
+- [`docs/migrate-monolith.md`](docs/migrate-monolith.md): moving an instance of the former single
+  application to the services, what is carried over and what is not, checking, going back.
+- [`docs/adr/`](docs/adr/README.md): this repository's decisions.
 - [`AGENTS.md`](AGENTS.md): how to work here, written for contributors and their tools: the common
   rules of the organization, how the installer is built, its gotchas and its checks.
 - The decisions that span several repositories, among them [0004. The installer and the product

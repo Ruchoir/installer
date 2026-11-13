@@ -69,6 +69,33 @@ enum Commands {
         #[arg(long)]
         lab: bool,
     },
+    /// Carry the data of an instance of the former single application (`Ruchoir/ruchoir`) over to
+    /// this one, which has started once (`up`) and is not in use yet: accounts and organisations to
+    /// Propolis, the inbox and push to the hub, and each product's own. Run again, it does the
+    /// same; the instance is started again at the end. See `docs/migrate-monolith.md`.
+    Migrate {
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// The monolith's database, from `pg_dump --format=custom`.
+        #[arg(long)]
+        from: PathBuf,
+        /// A copy of the monolith's object store: a directory where each object sits at its key.
+        #[arg(long)]
+        objects: PathBuf,
+        /// A file holding the monolith's `RUCHOIR_SECRET_ENCRYPTION_KEY` (64 hexadecimal
+        /// characters), which opens the secrets it kept encrypted.
+        #[arg(long)]
+        monolith_key_file: PathBuf,
+        /// Read and write everything in transactions rolled back, copy no object, and report.
+        #[arg(long)]
+        dry_run: bool,
+        /// The loopback port PostgreSQL is published on while the migration runs.
+        #[arg(long, default_value_t = 15432)]
+        postgres_port: u16,
+        /// The loopback port Garage's S3 API is published on while the migration runs.
+        #[arg(long, default_value_t = 13900)]
+        garage_port: u16,
+    },
     /// The hosts-file lines that send a development instance's names to this machine, for the
     /// programs that do not resolve `*.localhost` themselves (on Windows, anything but a browser).
     /// Printed; with `--write`, put in the system's hosts file (run as administrator on Windows,
@@ -155,6 +182,33 @@ fn run(command: Commands) -> Result<(), String> {
                 );
             }
             Ok(())
+        }
+        Commands::Migrate {
+            dir,
+            from,
+            objects,
+            monolith_key_file,
+            dry_run,
+            postgres_port,
+            garage_port,
+        } => {
+            let result = ruchoir_install::migrate::instance::migrate(
+                &ruchoir_install::migrate::instance::Options {
+                    dir: dir.clone(),
+                    dump: from,
+                    objects,
+                    monolith_key_file,
+                    dry_run,
+                    postgres_port,
+                    garage_port,
+                },
+            );
+            // Started again as `up` starts it, whatever happened: the published ports go with it.
+            let restarted =
+                compose(&dir, &["up", "--detach", "--wait"]).and_then(|()| prepare(&dir));
+            let report = result?;
+            print!("{report}");
+            restarted
         }
         Commands::Hosts { dir, write } => {
             if !dir.join("manifest.json").exists() {
