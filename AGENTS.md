@@ -185,9 +185,26 @@ namespace (Chromium sends `*.localhost` to the loopback) and trusts the developm
 - `src/hosts.rs`: the hosts-file block of a development instance (`ruchoir-install hosts`), for
   the programs that do not resolve `*.localhost` (anything but a browser on Windows): one line per
   host on each loopback, between marker lines, so `--write` replaces its own block and nothing else.
+- `src/migrate/`: `migrate`, which moves an instance of the monolith into this one (ADR 0001,
+  runbook `docs/migrate-monolith.md`). `instance.rs` does the Docker part (services stopped,
+  `compose.migrate.yaml` publishing PostgreSQL and Garage on the loopback, the dump restored into
+  `monolith_source`); `db.rs` moves rows as JSON (`json_populate_recordset` casts them); one module
+  per service says, in a table, where each monolith table goes and what is left behind;
+  `replica.rs` writes each product's copy of the organisations and its part of each role's
+  permissions.
 - `src/main.rs`: the command line.
 
 ### Gotchas
+
+- `migrate` writes the services' tables directly: `tests/fixtures/<service>-schema.sql` are their
+  schemas (`pg_dump --schema-only` after their migrations, `\restrict` lines removed), and
+  `monolith-schema.sql` the monolith's at its last commit. When a service's migration changes a
+  table `migrate` writes, take its fixture again and run `tests/migrate.rs` (it needs
+  `RUCHOIR_MIGRATE_TEST_DATABASE`, see the README).
+- A JSON row given to `db::insert` names its columns; a column only some rows name is null in the
+  others, not its default.
+- Propolis makes the three system roles of an organisation when it is inserted (a trigger), with
+  new ids: `identity.rs` gives them the monolith's ids right after.
 
 - The services run as the owner of the instance's directory (`RUCHOIR_USER` in `.env`, set on
   Linux): its private files are `0600`, and the images' own user could not read them.
@@ -282,7 +299,9 @@ This repository's own decisions go in `docs/adr/`.
 - The conventions check, with a clone of `Ruchoir/.github` at `$RULES`:
   `bash "$RULES/scripts/check-conventions.sh" "$RULES/common-rules.md"`, from the root.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
-  `cargo deny --config "$RULES/deny.toml" check`, as the shared `rust` workflow runs them.
+  `cargo deny --config "$RULES/deny.toml" check`, as the shared `rust` workflow runs them. The
+  migration's test runs only with `RUCHOIR_MIGRATE_TEST_DATABASE` set (README, "Testing it"): set it
+  when `src/migrate/` or a fixture changes.
 - The end-to-end test (`e2e/`, Playwright, an accepted exception for tests only): with a
   development instance up (`ruchoir-install dev --source ..`), `pnpm install` then `pnpm test` in
   `e2e/`. In CI the job runs once the repository variable `RUCHOIR_E2E` is `on`. It checks out
