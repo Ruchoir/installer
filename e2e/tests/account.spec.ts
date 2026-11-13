@@ -5,7 +5,10 @@ import { expect, test, type APIRequestContext } from "@playwright/test";
 /** Where the development instance's mail catcher answers (Mailpit's API). */
 const MAILPIT = process.env.MAILPIT_URL ?? "http://localhost:8025";
 
-/** The six-digit code of the last mail sent to `to`, waiting for it to arrive. */
+/**
+ * The six-digit code of the last mail sent to `to`, waiting for it to arrive. Propolis writes it in
+ * two groups of three (`869 239`); the field takes it without the space.
+ */
 async function confirmationCode(request: APIRequestContext, to: string): Promise<string> {
   let code: string | undefined;
   await expect
@@ -16,7 +19,7 @@ async function confirmationCode(request: APIRequestContext, to: string): Promise
         if (found.messages.length === 0) return false;
         const message = await request.get(`${MAILPIT}/api/v1/message/${found.messages[0].ID}`);
         const { Text } = (await message.json()) as { Text: string };
-        code = Text.match(/\b\d{6}\b/)?.[0];
+        code = Text.match(/\b(\d{3}) ?(\d{3})\b/)?.slice(1).join("");
         return code !== undefined;
       },
       { timeout: 30_000, message: `no confirmation code reached ${to}` },
@@ -34,7 +37,9 @@ test("a new person signs up, confirms their address and signs in", async ({ page
   await page.locator("#last").fill("Lovelace");
   await page.locator("#s-mail").fill(email);
   await page.locator("#s-pw").fill(password);
-  await page.getByRole("checkbox").check();
+  // The box itself is drawn by its label (the input is visually hidden): a person clicks the label.
+  await page.locator("label", { has: page.getByRole("checkbox") }).click();
+  await expect(page.getByRole("checkbox")).toBeChecked();
   await page.locator("form button[type=submit]").click();
 
   const code = await confirmationCode(request, email);
